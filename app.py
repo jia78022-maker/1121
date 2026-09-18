@@ -39,7 +39,7 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 
@@ -819,22 +819,23 @@ class DeliveryApp(tk.Tk):
         tk.Label(actions, text="待处理备货项目", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
         tk.Button(actions, text="标记为已备货", command=self.mark_stocked, bg="#2563eb", fg="white", relief="flat", bd=0,
                   activebackground="#1d4ed8", activeforeground="white", font=("Microsoft YaHei UI", 9, "bold"), padx=14, pady=8, cursor="hand2").pack(side="right")
-        columns = ("id", "customer", "product", "spec", "quantity", "delivery_date", "stock_status")
-        headings = ("编号", "客户", "产品", "型号 / 规格", "数量", "交货期限", "备货状态")
-        widths = (65, 180, 190, 200, 100, 130, 120)
-        self.stock_tree = ttk.Treeview(card, columns=columns, show="headings", selectmode="browse")
-        for col, heading, width in zip(columns, headings, widths):
-            self.stock_tree.heading(col, text=heading)
-            self.stock_tree.column(col, width=width, anchor="center" if col in ("id", "quantity", "delivery_date", "stock_status") else "w")
-        scroll = ttk.Scrollbar(card, orient="vertical", command=self.stock_tree.yview)
-        self.stock_tree.configure(yscrollcommand=scroll.set)
-        self.stock_tree.grid(row=1, column=0, sticky="nsew"); scroll.grid(row=1, column=1, sticky="ns")
+        self.stock_selected_id = None
+        self.stock_canvas = tk.Canvas(card, bg="#f8fafc", highlightthickness=0, bd=0)
+        scroll = ttk.Scrollbar(card, orient="vertical", command=self.stock_canvas.yview)
+        self.stock_canvas.configure(yscrollcommand=scroll.set)
+        self.stock_cards_frame = tk.Frame(self.stock_canvas, bg="#f8fafc")
+        self.stock_canvas_window = self.stock_canvas.create_window((0, 0), window=self.stock_cards_frame, anchor="nw")
+        self.stock_cards_frame.bind("<Configure>", lambda _event: self.stock_canvas.configure(scrollregion=self.stock_canvas.bbox("all")))
+        self.stock_canvas.bind("<Configure>", lambda event: self.stock_canvas.itemconfigure(self.stock_canvas_window, width=event.width))
+        self.stock_canvas.bind("<MouseWheel>", lambda event: self.stock_canvas.yview_scroll(int(-event.delta / 120), "units"))
+        self.stock_canvas.grid(row=1, column=0, sticky="nsew"); scroll.grid(row=1, column=1, sticky="ns")
         self.refresh_stocking_table()
 
     def refresh_stocking_table(self):
-        if not hasattr(self, "stock_tree"):
+        if not hasattr(self, "stock_cards_frame"):
             return
-        for item in self.stock_tree.get_children(): self.stock_tree.delete(item)
+        for item in self.stock_cards_frame.winfo_children():
+            item.destroy()
         filter_value = getattr(self, "stock_filter", "全部")
         where = "WHERE r.status NOT IN ('已发货', '已取消', '已撤销')"
         params = []
@@ -842,9 +843,13 @@ class DeliveryApp(tk.Tk):
             where += " AND r.status='待发货'"
         elif filter_value != "全部":
             where += " AND s.stock_status=?"; params.append(filter_value)
-        rows = self.conn.execute("SELECT s.* FROM stocking_items s JOIN records r ON r.id=s.record_id " + where + " ORDER BY CASE s.stock_status WHEN '待备货' THEN 0 ELSE 1 END, s.delivery_date, s.id", params).fetchall()
-        for row in rows:
-            self.stock_tree.insert("", "end", iid=str(row["id"]), values=tuple(row[key] for key in ("id", "customer", "product", "spec", "quantity", "delivery_date", "stock_status")))
+        rows = self.conn.execute("SELECT s.*, r.contact, r.phone, r.status AS order_status FROM stocking_items s JOIN records r ON r.id=s.record_id " + where + " ORDER BY CASE s.stock_status WHEN '待备货' THEN 0 ELSE 1 END, s.delivery_date, s.id", params).fetchall()
+        if self.stock_selected_id and not any(row["id"] == self.stock_selected_id for row in rows):
+            self.stock_selected_id = None
+        for index, row in enumerate(rows):
+            self._create_stock_card(row, index)
+        if not rows:
+            tk.Label(self.stock_cards_frame, text="当前模块没有备货项目", bg="#f8fafc", fg="#94a3b8", font=("Microsoft YaHei UI", 11)).pack(pady=46)
         all_rows = self.conn.execute("SELECT s.stock_status, r.status FROM stocking_items s JOIN records r ON r.id=s.record_id WHERE r.status NOT IN ('已发货', '已取消', '已撤销')").fetchall()
         counts = {"全部": len(all_rows), "待备货": sum(row["stock_status"] == "待备货" for row in all_rows), "已备货": sum(row["stock_status"] == "已备货" for row in all_rows), "待发货": sum(row["status"] == "待发货" for row in all_rows)}
         for key, button in getattr(self, "stock_module_buttons", {}).items():
@@ -852,16 +857,48 @@ class DeliveryApp(tk.Tk):
             button.configure(text=f"{label}\n{counts[key]}", bg="#dbeafe" if key == filter_value else "white")
         self.stock_summary.config(text=f"当前查看“{filter_value}”模块 · 共 {len(rows)} 条项目")
 
+    def _create_stock_card(self, row, index):
+        """备货客户信息卡；一张卡对应一条订单，可整卡点击选中。"""
+        selected = row["id"] == self.stock_selected_id
+        state_color = {"待备货": "#f59e0b", "已备货": "#10b981", "待发货": "#7c3aed"}.get(row["stock_status"], "#64748b")
+        background = "#eff6ff" if selected else "#ffffff"
+        border = "#60a5fa" if selected else "#e2e8f0"
+        card = tk.Frame(self.stock_cards_frame, bg=background, highlightthickness=1, highlightbackground=border, padx=16, pady=13, cursor="hand2")
+        card.grid(row=index // 2, column=index % 2, sticky="nsew", padx=(0, 12) if index % 2 == 0 else 0, pady=(0, 12))
+        self.stock_cards_frame.columnconfigure(0, weight=1); self.stock_cards_frame.columnconfigure(1, weight=1)
+        strip = tk.Frame(card, bg=state_color, width=5); strip.pack(side="left", fill="y", padx=(0, 12)); strip.pack_propagate(False)
+        content = tk.Frame(card, bg=background); content.pack(side="left", fill="both", expand=True)
+        head = tk.Frame(content, bg=background); head.pack(fill="x")
+        tk.Label(head, text=row["customer"], bg=background, fg="#172033", font=("Microsoft YaHei UI", 12, "bold"), cursor="hand2").pack(side="left")
+        tk.Label(head, text=row["stock_status"], bg=state_color, fg="white", font=("Microsoft YaHei UI", 8, "bold"), padx=8, pady=3, cursor="hand2").pack(side="right")
+        contact = row["contact"] or "未填写联系人"
+        phone = row["phone"] or "未填写电话"
+        tk.Label(content, text=f"{contact}  ·  {phone}", bg=background, fg="#64748b", font=("Microsoft YaHei UI", 8), cursor="hand2").pack(anchor="w", pady=(5, 9))
+        tk.Label(content, text=row["product"] or "未填写产品", bg=background, fg="#334155", font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2").pack(anchor="w")
+        tk.Label(content, text=f"型号 / 规格：{row['spec'] or '—'}", bg=background, fg="#64748b", font=("Microsoft YaHei UI", 8), cursor="hand2").pack(anchor="w", pady=(3, 9))
+        foot = tk.Frame(content, bg=background); foot.pack(fill="x")
+        tk.Label(foot, text=f"数量  {row['quantity'] or '—'}", bg=background, fg="#334155", font=("Microsoft YaHei UI", 9, "bold"), cursor="hand2").pack(side="left")
+        tk.Label(foot, text=f"交期  {row['delivery_date']}", bg=background, fg="#c2410c" if row["stock_status"] == "待备货" else "#64748b", font=("Microsoft YaHei UI", 8, "bold"), cursor="hand2").pack(side="right")
+        self._bind_stock_card_click(card, row["id"])
+
+    def _bind_stock_card_click(self, widget, item_id):
+        widget.bind("<Button-1>", lambda _event, value=item_id: self.select_stock_card(value))
+        for child in widget.winfo_children():
+            self._bind_stock_card_click(child, item_id)
+
+    def select_stock_card(self, item_id):
+        self.stock_selected_id = item_id
+        self.refresh_stocking_table()
+
     def set_stock_filter(self, value):
         self.stock_filter = value
         self.refresh_stocking_table()
 
     def mark_stocked(self):
-        selected = self.stock_tree.selection() if hasattr(self, "stock_tree") else ()
-        if not selected:
+        item_id = getattr(self, "stock_selected_id", None)
+        if not item_id:
             messagebox.showwarning("未选择项目", "请先选择一条备货项目。", parent=self)
             return
-        item_id = int(selected[0])
         row = self.conn.execute("SELECT stock_status, record_id FROM stocking_items WHERE id=?", (item_id,)).fetchone()
         next_status = "待备货" if row and row["stock_status"] == "已备货" else "已备货"
         self.conn.execute("UPDATE stocking_items SET stock_status=?, updated_at=? WHERE id=?", (next_status, datetime.now().isoformat(timespec="seconds"), item_id))
