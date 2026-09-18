@@ -9,8 +9,11 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import threading
+import urllib.error
+import urllib.request
 import winreg
 import tkinter as tk
 from datetime import date, datetime, timedelta
@@ -36,6 +39,9 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
+APP_VERSION = "1.0.1"
+GITHUB_REPOSITORY = "jia78022-maker/1121"
+GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 
 THEMES = {
     "light": {"bg": "#f3f6fb", "surface": "#ffffff", "border": "#dce5f0", "text": "#1e293b", "muted": "#64748b", "accent": "#2563eb", "accent_active": "#1d4ed8", "head": "#eaf1fb", "selected": "#bfdbfe"},
@@ -199,6 +205,7 @@ class DeliveryApp(tk.Tk):
         self.reminder_log = load_reminder_log()
         self.autostart_enabled = autostart_is_enabled()
         self.speech_lock = threading.Lock()
+        self.update_check_running = False
         self.entries = {}
         self._connect_db()
         self._setup_style()
@@ -233,7 +240,103 @@ class DeliveryApp(tk.Tk):
         else:
             self.deiconify()
         self.after(500, self.schedule_next_alarm)
+        # 启动后后台检查，不阻塞离线订单录入。
+        self.after(900, self.check_for_updates)
         return True
+
+    @staticmethod
+    def _version_key(value):
+        """将 v1.2.3 形式的版本号转为可比较数字；非数字片段不参与版本升级。"""
+        parts = str(value or "").strip().lstrip("vV").split(".")
+        key = []
+        for part in parts[:4]:
+            digits = "".join(char for char in part if char.isdigit())
+            key.append(int(digits or 0))
+        return tuple((key + [0, 0, 0, 0])[:4])
+
+    def check_for_updates(self, manual=False):
+        """从本仓库 GitHub Releases 后台读取最新发布版本。"""
+        if self.update_check_running:
+            return
+        self.update_check_running = True
+        if hasattr(self, "update_button"):
+            self.update_button.configure(text="↻  正在检查…", state="disabled")
+
+        def worker():
+            try:
+                request = urllib.request.Request(GITHUB_RELEASE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": "CustomerManager-Updater"})
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    release = json.loads(response.read().decode("utf-8"))
+                version = release.get("tag_name") or release.get("name") or ""
+                newer = self._version_key(version) > self._version_key(APP_VERSION)
+                result = {"release": release, "version": version, "newer": newer}
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as error:
+                result = {"error": str(error)}
+            self.after(0, lambda: self._finish_update_check(result, manual))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update_check(self, result, manual):
+        self.update_check_running = False
+        if hasattr(self, "update_button") and self.update_button.winfo_exists():
+            self.update_button.configure(text="↻  检查更新", state="normal")
+        if result.get("error"):
+            if manual:
+                messagebox.showwarning("检查更新失败", "无法连接 GitHub Releases。请检查网络后重试。\n\n" + result["error"], parent=self)
+            return
+        if not result["newer"]:
+            if manual:
+                messagebox.showinfo("已是最新版本", f"当前版本 {APP_VERSION} 已是最新版本。", parent=self)
+            return
+        release = result["release"]
+        notes = (release.get("body") or "暂无更新说明").strip()
+        prompt = f"发现新版本 {result['version']}（当前 {APP_VERSION}）\n\n{notes[:700]}\n\n现在下载并安装吗？"
+        if messagebox.askyesno("发现新版本", prompt, parent=self):
+            self.download_and_install_update(release)
+
+    def download_and_install_update(self, release):
+        """下载 Release 附件并以 SHA-256 校验后交由独立脚本替换正在运行的 EXE。"""
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo("开发环境", "检测到新版本。打包后的客户管理器.exe 会自动下载安装；当前源码运行模式不执行替换。", parent=self)
+            return
+        assets = release.get("assets", [])
+        executable = next((item for item in assets if item.get("name", "").lower().endswith(".exe")), None)
+        checksum = next((item for item in assets if item.get("name", "").lower().endswith((".sha256", ".sha256.txt"))), None)
+        if not executable or not checksum:
+            messagebox.showwarning("发布文件不完整", "该 GitHub Release 必须同时包含“客户管理器.exe”和对应的“.sha256”校验文件，已取消安装。", parent=self)
+            return
+        self.update_button.configure(text="↓  正在下载…", state="disabled")
+
+        def worker():
+            try:
+                headers = {"User-Agent": "CustomerManager-Updater"}
+                with urllib.request.urlopen(urllib.request.Request(executable["browser_download_url"], headers=headers), timeout=90) as response:
+                    package = response.read()
+                with urllib.request.urlopen(urllib.request.Request(checksum["browser_download_url"], headers=headers), timeout=20) as response:
+                    expected = response.read().decode("utf-8").strip().split()[0].lower()
+                actual = hashlib.sha256(package).hexdigest().lower()
+                if not expected or actual != expected:
+                    raise ValueError("下载文件的 SHA-256 校验失败")
+                package_path = Path(tempfile.gettempdir()) / "客户管理器-update.exe"
+                package_path.write_bytes(package)
+                self.after(0, lambda: self._replace_with_update(package_path))
+            except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as error:
+                self.after(0, lambda: self._update_install_failed(str(error)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_install_failed(self, detail):
+        if hasattr(self, "update_button") and self.update_button.winfo_exists():
+            self.update_button.configure(text="↻  检查更新", state="normal")
+        messagebox.showerror("更新失败", "下载或校验新版本时出错，当前版本未被修改。\n\n" + detail, parent=self)
+
+    def _replace_with_update(self, package_path):
+        target = Path(sys.executable).resolve()
+        script = Path(tempfile.gettempdir()) / "客户管理器-update.bat"
+        # /b 等待当前进程结束后再覆盖，随后立即启动新程序；失败不会删除旧程序。
+        script.write_text(f"@echo off\r\ntimeout /t 2 /nobreak >nul\r\nmove /y \"{package_path}\" \"{target}\" >nul\r\nstart \"\" \"{target}\"\r\ndel \"%~f0\"\r\n", encoding="gbk", errors="replace")
+        subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.on_close()
 
     def _connect_db(self):
         self.conn = sqlite3.connect(DB_PATH)
@@ -350,6 +453,9 @@ class DeliveryApp(tk.Tk):
         self.test_sound_button = tk.Button(sidebar, text="♬  测试铃声", command=self.test_reminder_sound, bg="#172033", fg="#cbd5e1", relief="flat", bd=0,
                                            activebackground="#253657", activeforeground="white", font=("Microsoft YaHei UI", 9), cursor="hand2", anchor="w")
         self.test_sound_button.pack(side="bottom", fill="x", padx=24, pady=(0, 10))
+        self.update_button = tk.Button(sidebar, text="↻  检查更新", command=lambda: self.check_for_updates(manual=True), bg="#172033", fg="#cbd5e1", relief="flat", bd=0,
+                                       activebackground="#253657", activeforeground="white", font=("Microsoft YaHei UI", 9), cursor="hand2", anchor="w")
+        self.update_button.pack(side="bottom", fill="x", padx=24, pady=(0, 10))
         tk.Button(sidebar, text="退出登录", command=self.logout, bg="#172033", fg="#97a4ba", relief="flat", bd=0,
                   activebackground="#253657", activeforeground="white", font=("Microsoft YaHei UI", 9), cursor="hand2").pack(side="bottom", anchor="w", padx=25, pady=20)
 
