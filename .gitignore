@@ -1,0 +1,13 @@
+# 本地运行数据及账号绝不上传
+account.json
+session.json
+delivery_manager.db
+ui_settings.json
+reminder_log.json
+
+# 打包产物与临时文件
+build/
+dist/
+__pycache__/
+*.spec
+

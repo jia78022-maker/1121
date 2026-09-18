@@ -1,0 +1,7 @@
+{
+  "version": "1.0.1",
+  "download_url": "https://your-domain.example/downloads/customer-manager-1.0.1.exe",
+  "sha256": "填写该安装包的 SHA-256 校验值",
+  "release_notes": "本次更新内容",
+  "mandatory": false
+}
