@@ -9,6 +9,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import ssl
 import tempfile
 import time
 import threading
@@ -39,10 +40,17 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 CLOUD_API_BASE = "https://api.songpornsongx.top"
+
+
+def github_ssl_context():
+    """Use a bundled public CA set so packaged Windows builds can verify GitHub TLS."""
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    ca_bundle = bundle_root / "certs" / "cacert.pem"
+    return ssl.create_default_context(cafile=str(ca_bundle))
 
 THEMES = {
     "light": {"bg": "#f3f6fb", "surface": "#ffffff", "border": "#dce5f0", "text": "#1e293b", "muted": "#64748b", "accent": "#2563eb", "accent_active": "#1d4ed8", "head": "#eaf1fb", "selected": "#bfdbfe"},
@@ -316,7 +324,7 @@ class DeliveryApp(tk.Tk):
         def worker():
             try:
                 request = urllib.request.Request(GITHUB_RELEASE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": "CustomerManager-Updater"})
-                with urllib.request.urlopen(request, timeout=8) as response:
+                with urllib.request.urlopen(request, timeout=8, context=github_ssl_context()) as response:
                     release = json.loads(response.read().decode("utf-8"))
                 version = release.get("tag_name") or release.get("name") or ""
                 newer = self._version_key(version) > self._version_key(APP_VERSION)
@@ -361,9 +369,9 @@ class DeliveryApp(tk.Tk):
         def worker():
             try:
                 headers = {"User-Agent": "CustomerManager-Updater"}
-                with urllib.request.urlopen(urllib.request.Request(executable["browser_download_url"], headers=headers), timeout=90) as response:
+                with urllib.request.urlopen(urllib.request.Request(executable["browser_download_url"], headers=headers), timeout=90, context=github_ssl_context()) as response:
                     package = response.read()
-                with urllib.request.urlopen(urllib.request.Request(checksum["browser_download_url"], headers=headers), timeout=20) as response:
+                with urllib.request.urlopen(urllib.request.Request(checksum["browser_download_url"], headers=headers), timeout=20, context=github_ssl_context()) as response:
                     expected = response.read().decode("utf-8").strip().split()[0].lower()
                 actual = hashlib.sha256(package).hexdigest().lower()
                 if not expected or actual != expected:
