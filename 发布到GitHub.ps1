@@ -29,6 +29,8 @@ $asset = Join-Path $root "客户管理器.exe"
 $hashAsset = "$asset.sha256"
 $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
 Set-Content -LiteralPath $hashAsset -Value "$hash  客户管理器.exe" -Encoding ascii
+$zipAsset = Join-Path $root "客户管理器-v$Version.zip"
+Compress-Archive -LiteralPath $asset, $hashAsset -DestinationPath $zipAsset -Force
 
 # 只提交源代码和图标；本地账号、订单数据库、EXE 与令牌均由 .gitignore 排除。
 git add app.py create_icon.py 客户管理器.ico 客户管理器图标.png server\account_server.py .gitignore 发布到GitHub.ps1
@@ -50,7 +52,8 @@ try {
 
 foreach ($upload in @(
     @{ file = $asset; name = "CustomerManager.exe" },
-    @{ file = $hashAsset; name = "CustomerManager.exe.sha256" }
+    @{ file = $hashAsset; name = "CustomerManager.exe.sha256" },
+    @{ file = $zipAsset; name = "CustomerManager-v$Version.zip" }
 )) {
     $file = $upload.file
     $name = $upload.name
