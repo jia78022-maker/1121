@@ -39,9 +39,10 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.0"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
+CLOUD_API_BASE = "https://api.songpornsongx.top"
 
 THEMES = {
     "light": {"bg": "#f3f6fb", "surface": "#ffffff", "border": "#dce5f0", "text": "#1e293b", "muted": "#64748b", "accent": "#2563eb", "accent_active": "#1d4ed8", "head": "#eaf1fb", "selected": "#bfdbfe"},
@@ -77,6 +78,21 @@ def save_reminder_log(entries):
     cutoff = (date.today() - timedelta(days=45)).isoformat()
     kept = sorted(entry for entry in entries if entry[:10] >= cutoff)
     REMINDER_LOG_PATH.write_text(json.dumps(kept, ensure_ascii=False), encoding="utf-8")
+
+
+def cloud_post(path, payload, token=None):
+    headers = {"Content-Type": "application/json", "User-Agent": "CustomerManager/1.0"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(CLOUD_API_BASE + path, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as error:
+        raise RuntimeError("无法连接云端服务：" + str(error)) from error
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message", "云端服务操作失败。"))
+    return result
 
 
 def autostart_command():
@@ -177,6 +193,44 @@ class LoginDialog(tk.Toplevel):
         self.destroy()
 
 
+class CloudLoginDialog(tk.Toplevel):
+    """手机号/密码云端账户入口；令牌只保存在本机，会话可随时退出。"""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.success = False
+        self.token = None
+        self.title("客户管理器 - 云端登录")
+        self.configure(bg="white")
+        self.resizable(False, False)
+        self.transient(parent); self.grab_set()
+        frame = tk.Frame(self, bg="white", padx=42, pady=32); frame.pack()
+        tk.Label(frame, text="登录客户管理器", bg="white", fg="#172033", font=("Microsoft YaHei UI", 17, "bold")).pack(anchor="w")
+        tk.Label(frame, text="订单将加密传输并同步到你的云端账户。", bg="white", fg="#64748b", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(5, 20))
+        tk.Label(frame, text="手机号", bg="white", fg="#334155", font=("Microsoft YaHei UI", 10)).pack(anchor="w")
+        self.phone = ttk.Entry(frame, width=31, font=("Microsoft YaHei UI", 10)); self.phone.pack(fill="x", pady=(5, 13))
+        tk.Label(frame, text="密码", bg="white", fg="#334155", font=("Microsoft YaHei UI", 10)).pack(anchor="w")
+        self.password = ttk.Entry(frame, width=31, show="●", font=("Microsoft YaHei UI", 10)); self.password.pack(fill="x", pady=(5, 18))
+        actions = tk.Frame(frame, bg="white"); actions.pack(fill="x")
+        ttk.Button(actions, text="注册", command=lambda: self.submit("/api/register")).pack(side="left")
+        ttk.Button(actions, text="登录", style="Accent.TButton", command=lambda: self.submit("/api/login")).pack(side="right")
+        self.bind("<Return>", lambda _event: self.submit("/api/login"))
+        self.after(100, self.phone.focus_set)
+
+    def submit(self, endpoint):
+        phone, password = self.phone.get().strip(), self.password.get()
+        if not phone.isdigit() or not 6 <= len(phone) <= 20 or len(password) < 6:
+            messagebox.showwarning("信息格式不正确", "请输入 6 至 20 位手机号，以及至少 6 位密码。", parent=self)
+            return
+        try:
+            result = cloud_post(endpoint, {"username": phone, "password": password})
+        except RuntimeError as error:
+            messagebox.showerror("云端登录失败", str(error), parent=self)
+            return
+        self.success, self.token = True, result["token"]
+        SESSION_PATH.write_text(json.dumps({"username": phone, "token": self.token, "cloud": True}, ensure_ascii=False), encoding="utf-8")
+        self.destroy()
+
+
 class DeliveryApp(tk.Tk):
     FIELDS = [
         ("客户名称", "customer", True),
@@ -221,24 +275,21 @@ class DeliveryApp(tk.Tk):
         self.bind("<Configure>", self._responsive_layout, add="+")
 
     def authenticate(self):
-        """存在本机保存的本地登录状态时直接进入，否则显示账号窗口。"""
-        session_valid = False
-        if ACCOUNT_PATH.exists() and SESSION_PATH.exists():
-            try:
-                account = json.loads(ACCOUNT_PATH.read_text(encoding="utf-8"))
-                session = json.loads(SESSION_PATH.read_text(encoding="utf-8"))
-                session_valid = bool(session.get("username")) and session.get("username") == account.get("username")
-            except (OSError, json.JSONDecodeError):
-                SESSION_PATH.unlink(missing_ok=True)
-        if not session_valid:
-            # 登录框是主窗口的临时窗口；先显示主窗口才能确保 Windows 不会把它一并隐藏。
-            self.deiconify()
-            dialog = LoginDialog(self)
+        """恢复云端会话，或要求手机号/密码登录。"""
+        self.cloud_token = None
+        try:
+            session = json.loads(SESSION_PATH.read_text(encoding="utf-8"))
+            self.cloud_token = session.get("token") if session.get("cloud") else None
+        except (OSError, json.JSONDecodeError):
+            pass
+        self.deiconify()
+        if not self.cloud_token:
+            dialog = CloudLoginDialog(self)
             self.wait_window(dialog)
             if not dialog.success:
                 return False
-        else:
-            self.deiconify()
+            self.cloud_token = dialog.token
+        self.after(300, self.sync_from_cloud)
         self.after(500, self.schedule_next_alarm)
         # 启动后后台检查，不阻塞离线订单录入。
         self.after(900, self.check_for_updates)
@@ -338,6 +389,40 @@ class DeliveryApp(tk.Tk):
         subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.on_close()
 
+    def sync_from_cloud(self):
+        if not getattr(self, "cloud_token", None): return
+        try:
+            result = cloud_post("/api/sync/pull", {}, self.cloud_token)
+            records = result.get("records", [])
+            inventory = result.get("inventory", {})
+            if records:
+                self.conn.execute("DELETE FROM records")
+                columns = ("customer", "contact", "phone", "product", "spec", "quantity", "price", "delivery_date", "status", "notes", "created_at", "shipping_at")
+                for row in records:
+                    self.conn.execute("INSERT INTO records(" + ",".join(columns) + ") VALUES (" + ",".join("?" * len(columns)) + ")", tuple(row.get(key, "") for key in columns))
+                self.conn.execute("DELETE FROM stocking_items")
+                self.conn.execute("""INSERT INTO stocking_items(record_id, customer, product, spec, quantity, delivery_date, stock_status, updated_at)
+                    SELECT id, customer, product, spec, quantity, delivery_date, '待备货', created_at FROM records""")
+            has_inventory = isinstance(inventory, dict) and bool(inventory)
+            if has_inventory:
+                self._import_inventory(inventory)
+            if records or has_inventory:
+                self.conn.commit(); self.refresh_all_data(); self.refresh_machine_choices(); self.show_toast("已同步云端数据")
+            else:
+                self.sync_to_cloud()
+        except RuntimeError:
+            self.show_toast("云端暂不可用，订单仍保存在本机")
+
+    def sync_to_cloud(self):
+        if not getattr(self, "cloud_token", None): return
+        columns = ("customer", "contact", "phone", "product", "spec", "quantity", "price", "delivery_date", "status", "notes", "created_at", "shipping_at")
+        rows = [dict(row) for row in self.conn.execute("SELECT " + ",".join(columns) + " FROM records").fetchall()]
+        inventory = self._export_inventory()
+        def worker():
+            try: cloud_post("/api/sync/push", {"records": rows, "inventory": inventory}, self.cloud_token)
+            except RuntimeError: pass
+        threading.Thread(target=worker, daemon=True).start()
+
     def _connect_db(self):
         self.conn = sqlite3.connect(DB_PATH)
         self.conn.row_factory = sqlite3.Row
@@ -377,7 +462,46 @@ class DeliveryApp(tk.Tk):
         self.conn.execute("""INSERT OR IGNORE INTO stocking_items
             (record_id, customer, product, spec, quantity, delivery_date, stock_status, updated_at)
             SELECT id, customer, product, spec, quantity, delivery_date, '待备货', created_at FROM records""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS parts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stock_quantity INTEGER NOT NULL DEFAULT 0, unit TEXT NOT NULL DEFAULT '件',
+            notes TEXT, updated_at TEXT NOT NULL)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS machines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            model TEXT, notes TEXT, updated_at TEXT NOT NULL)""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS machine_parts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, machine_id INTEGER NOT NULL,
+            part_id INTEGER NOT NULL, quantity INTEGER NOT NULL,
+            UNIQUE(machine_id, part_id))""")
         self.conn.commit()
+
+    def _export_inventory(self):
+        return {
+            "parts": [dict(row) for row in self.conn.execute("SELECT name, stock_quantity, unit, notes, updated_at FROM parts").fetchall()],
+            "machines": [dict(row) for row in self.conn.execute("SELECT id, name, model, notes, updated_at FROM machines").fetchall()],
+            "machine_parts": [dict(row) for row in self.conn.execute("""SELECT m.name AS machine_name, p.name AS part_name, mp.quantity
+                FROM machine_parts mp JOIN machines m ON m.id=mp.machine_id JOIN parts p ON p.id=mp.part_id""").fetchall()],
+        }
+
+    def _import_inventory(self, inventory):
+        """云端库存是完整快照；以名称恢复，避免依赖不同电脑上的 SQLite id。"""
+        parts = inventory.get("parts", [])
+        machines = inventory.get("machines", [])
+        links = inventory.get("machine_parts", [])
+        if not isinstance(parts, list) or not isinstance(machines, list) or not isinstance(links, list):
+            return
+        self.conn.execute("DELETE FROM machine_parts"); self.conn.execute("DELETE FROM machines"); self.conn.execute("DELETE FROM parts")
+        for item in parts:
+            self.conn.execute("INSERT OR IGNORE INTO parts(name, stock_quantity, unit, notes, updated_at) VALUES (?, ?, ?, ?, ?)",
+                              (item.get("name", ""), int(item.get("stock_quantity", 0) or 0), item.get("unit", "件") or "件", item.get("notes", ""), item.get("updated_at", datetime.now().isoformat(timespec="seconds"))))
+        for item in machines:
+            self.conn.execute("INSERT OR IGNORE INTO machines(name, model, notes, updated_at) VALUES (?, ?, ?, ?)",
+                              (item.get("name", ""), item.get("model", ""), item.get("notes", ""), item.get("updated_at", datetime.now().isoformat(timespec="seconds"))))
+        for item in links:
+            machine = self.conn.execute("SELECT id FROM machines WHERE name=?", (item.get("machine_name", ""),)).fetchone()
+            part = self.conn.execute("SELECT id FROM parts WHERE name=?", (item.get("part_name", ""),)).fetchone()
+            if machine and part:
+                self.conn.execute("INSERT OR IGNORE INTO machine_parts(machine_id, part_id, quantity) VALUES (?, ?, ?)", (machine[0], part[0], max(1, int(item.get("quantity", 1) or 1))))
 
     def center_window(self, width, height):
         width = min(width, self.winfo_screenwidth() - 32)
@@ -435,6 +559,12 @@ class DeliveryApp(tk.Tk):
         self.nav_stock = tk.Button(sidebar, text="   备货单", command=self.open_stocking, bg="#172033", fg="#97a4ba", anchor="w", relief="flat", bd=0,
                                    activebackground="#253657", activeforeground="white", pady=12, font=("Microsoft YaHei UI", 10), cursor="hand2")
         self.nav_stock.pack(fill="x", padx=14, pady=(3, 0))
+        self.nav_parts = tk.Button(sidebar, text="   零件库存", command=self.open_parts, bg="#172033", fg="#97a4ba", anchor="w", relief="flat", bd=0,
+                                   activebackground="#253657", activeforeground="white", pady=12, font=("Microsoft YaHei UI", 10), cursor="hand2")
+        self.nav_parts.pack(fill="x", padx=14, pady=(3, 0))
+        self.nav_machines = tk.Button(sidebar, text="   机器构成", command=self.open_machines, bg="#172033", fg="#97a4ba", anchor="w", relief="flat", bd=0,
+                                      activebackground="#253657", activeforeground="white", pady=12, font=("Microsoft YaHei UI", 10), cursor="hand2")
+        self.nav_machines.pack(fill="x", padx=14, pady=(3, 0))
         self.nav_shipped = tk.Button(sidebar, text="   已发货", command=self.open_shipped, bg="#172033", fg="#97a4ba", anchor="w", relief="flat", bd=0,
                                      activebackground="#253657", activeforeground="white", pady=12, font=("Microsoft YaHei UI", 10), cursor="hand2")
         self.nav_shipped.pack(fill="x", padx=14, pady=(3, 0))
@@ -505,6 +635,8 @@ class DeliveryApp(tk.Tk):
             if key == "status":
                 field = ttk.Combobox(slot, values=["待交付", "生产中", "待发货", "已发货", "已取消", "已撤销"], state="readonly", font=("Microsoft YaHei UI", 10))
                 field.set("待交付")
+            elif key == "product":
+                field = ttk.Combobox(slot, values=self.get_machine_names(), state="normal", font=("Microsoft YaHei UI", 10))
             else:
                 field = ttk.Entry(slot, font=("Microsoft YaHei UI", 10))
                 if key == "delivery_date": field.insert(0, date.today().isoformat())
@@ -705,9 +837,9 @@ class DeliveryApp(tk.Tk):
         self.brand_mark.configure(text="客" if compact else "Q期")
         self.brand_name.configure(text="" if compact else "客户管理器")
         self.brand_subtitle.configure(text="" if compact else "DELIVERY DESK")
-        labels = ((self.nav_order, "订单"), (self.nav_stock, "备货"), (self.nav_shipped, "发货"), (self.nav_stats, "统计"))
+        labels = ((self.nav_order, "订单"), (self.nav_stock, "备货"), (self.nav_parts, "库存"), (self.nav_machines, "机器"), (self.nav_shipped, "发货"), (self.nav_stats, "统计"))
         for button, text in labels:
-            button.configure(text=text if compact else "   " + {"订单": "订单管理", "备货": "备货单", "发货": "已发货", "统计": "数据统计"}[text], anchor="center" if compact else "w")
+            button.configure(text=text if compact else "   " + {"订单": "订单管理", "备货": "备货单", "库存": "零件库存", "机器": "机器构成", "发货": "已发货", "统计": "数据统计"}[text], anchor="center" if compact else "w")
         if not hasattr(self, "field_slots"):
             return
         columns = 2 if compact else 3
@@ -733,7 +865,7 @@ class DeliveryApp(tk.Tk):
 
     def _show_page(self, page):
         """所有主页面在同一位置叠放，切换时确保只有目标页面可见。"""
-        for name in ("body", "statistics_page", "stocking_page", "shipped_page"):
+        for name in ("body", "statistics_page", "stocking_page", "parts_page", "machines_page", "shipped_page"):
             candidate = getattr(self, name, None)
             if candidate is not None and candidate.winfo_exists():
                 candidate.place_forget()
@@ -741,9 +873,7 @@ class DeliveryApp(tk.Tk):
         page.lift()
 
     def open_statistics(self):
-        self.nav_order.configure(bg="#172033", fg="#97a4ba")
-        self.nav_stock.configure(bg="#172033", fg="#97a4ba")
-        self.nav_stats.configure(bg="#253657", fg="white")
+        self._set_active_nav("stats")
         if hasattr(self, "statistics_page") and self.statistics_page.winfo_exists():
             self._show_page(self.statistics_page)
             self.render_statistics(self.stat_period.get())
@@ -785,10 +915,171 @@ class DeliveryApp(tk.Tk):
         self.chart_canvas.bind("<Configure>", lambda _event: self.draw_chart())
         self.render_statistics("month")
 
+    def _set_active_nav(self, active):
+        for name in ("order", "stock", "parts", "machines", "shipped", "stats"):
+            button = getattr(self, "nav_" + name, None)
+            if button:
+                button.configure(bg="#253657" if name == active else "#172033", fg="white" if name == active else "#97a4ba")
+
+    def get_machine_names(self):
+        return [row[0] for row in self.conn.execute("SELECT name FROM machines ORDER BY name").fetchall()]
+
+    def refresh_machine_choices(self):
+        field = getattr(self, "entries", {}).get("product")
+        if field and isinstance(field, ttk.Combobox):
+            field.configure(values=self.get_machine_names())
+
+    def open_parts(self):
+        self._set_active_nav("parts")
+        if hasattr(self, "parts_page") and self.parts_page.winfo_exists():
+            self._show_page(self.parts_page); self.refresh_parts_table(); return
+        page = tk.Frame(self.page_host, bg="#f5f7fb", padx=34, pady=28)
+        self.parts_page = page; self._show_page(page)
+        page.columnconfigure(0, weight=1); page.rowconfigure(3, weight=1)
+        tk.Label(page, text="零件库存", bg="#f5f7fb", fg="#172033", font=("Microsoft YaHei UI", 22, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(page, text="先建立自定义零件，再把零件组合为机器；库存只在此处手动加减。", bg="#f5f7fb", fg="#64748b", font=("Microsoft YaHei UI", 9)).grid(row=1, column=0, sticky="w", pady=(5, 16))
+        editor = tk.Frame(page, bg="white", padx=20, pady=16, highlightthickness=1, highlightbackground="#e2e8f0")
+        editor.grid(row=2, column=0, sticky="ew", pady=(0, 16))
+        for col in range(4): editor.columnconfigure(col, weight=1)
+        self.part_vars = {key: tk.StringVar() for key in ("name", "quantity", "unit", "notes")}; self.part_vars["unit"].set("件")
+        for col, (text, key) in enumerate((("零件名称 *", "name"), ("库存数量 *", "quantity"), ("单位", "unit"), ("备注", "notes"))):
+            box = tk.Frame(editor, bg="white"); box.grid(row=0, column=col, sticky="ew", padx=(0, 12) if col < 3 else 0)
+            tk.Label(box, text=text, bg="white", fg="#536177", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(0, 5))
+            ttk.Entry(box, textvariable=self.part_vars[key], font=("Microsoft YaHei UI", 10)).pack(fill="x", ipady=5)
+        actions = tk.Frame(editor, bg="white"); actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        tk.Button(actions, text="保存零件", command=self.save_part, bg="#2563eb", fg="white", relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left")
+        tk.Button(actions, text="库存 +", command=lambda: self.adjust_part_stock(1), relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left", padx=8)
+        tk.Button(actions, text="库存 −", command=lambda: self.adjust_part_stock(-1), relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left")
+        tk.Button(actions, text="删除零件", command=self.delete_part, bg="#fff1f2", fg="#be123c", relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left", padx=8)
+        card = tk.Frame(page, bg="white", padx=18, pady=16, highlightthickness=1, highlightbackground="#e2e8f0"); card.grid(row=3, column=0, sticky="nsew")
+        card.columnconfigure(0, weight=1); card.rowconfigure(1, weight=1)
+        tk.Label(card, text="自定义零件", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.parts_tree = ttk.Treeview(card, columns=("name", "quantity", "unit", "notes"), show="headings", selectmode="browse")
+        for key, title, width in (("name", "零件", 220), ("quantity", "库存", 120), ("unit", "单位", 100), ("notes", "备注", 330)):
+            self.parts_tree.heading(key, text=title); self.parts_tree.column(key, width=width, anchor="center" if key in ("quantity", "unit") else "w")
+        scroll = ttk.Scrollbar(card, orient="vertical", command=self.parts_tree.yview); self.parts_tree.configure(yscrollcommand=scroll.set)
+        self.parts_tree.grid(row=1, column=0, sticky="nsew"); scroll.grid(row=1, column=1, sticky="ns")
+        self.parts_tree.bind("<<TreeviewSelect>>", self.load_selected_part); self.selected_part_id = None; self.refresh_parts_table()
+
+    def refresh_parts_table(self):
+        if not hasattr(self, "parts_tree"): return
+        self.parts_tree.delete(*self.parts_tree.get_children())
+        for row in self.conn.execute("SELECT * FROM parts ORDER BY name").fetchall():
+            self.parts_tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["stock_quantity"], row["unit"], row["notes"] or ""))
+
+    def load_selected_part(self, _event=None):
+        selected = self.parts_tree.selection()
+        if not selected: return
+        self.selected_part_id = int(selected[0]); row = self.conn.execute("SELECT * FROM parts WHERE id=?", (self.selected_part_id,)).fetchone()
+        for key in self.part_vars: self.part_vars[key].set(str(row[{"name":"name", "quantity":"stock_quantity", "unit":"unit", "notes":"notes"}[key]] or ""))
+
+    def save_part(self):
+        name = self.part_vars["name"].get().strip()
+        try: quantity = int(self.part_vars["quantity"].get().strip())
+        except ValueError: messagebox.showwarning("数量不正确", "库存数量请输入整数。", parent=self); return
+        if not name or quantity < 0: messagebox.showwarning("请补全信息", "请输入零件名称和不小于 0 的库存数量。", parent=self); return
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            if self.selected_part_id: self.conn.execute("UPDATE parts SET name=?, stock_quantity=?, unit=?, notes=?, updated_at=? WHERE id=?", (name, quantity, self.part_vars["unit"].get().strip() or "件", self.part_vars["notes"].get().strip(), now, self.selected_part_id))
+            else: self.conn.execute("INSERT INTO parts(name, stock_quantity, unit, notes, updated_at) VALUES (?, ?, ?, ?, ?)", (name, quantity, self.part_vars["unit"].get().strip() or "件", self.part_vars["notes"].get().strip(), now))
+        except sqlite3.IntegrityError: messagebox.showwarning("名称重复", "已有同名零件，请修改后保存。", parent=self); return
+        self.conn.commit(); self.refresh_parts_table(); self.refresh_machine_choices(); self.sync_to_cloud(); self.show_toast("零件库存已保存")
+
+    def adjust_part_stock(self, direction):
+        if not self.selected_part_id: messagebox.showwarning("未选择零件", "请先在下方选择一个零件。", parent=self); return
+        try: delta = int(self.part_vars["quantity"].get().strip())
+        except ValueError: messagebox.showwarning("数量不正确", "请在库存数量中填写本次加减的整数。", parent=self); return
+        if delta < 0: messagebox.showwarning("数量不正确", "请填写正整数，按钮决定加或减。", parent=self); return
+        row = self.conn.execute("SELECT stock_quantity FROM parts WHERE id=?", (self.selected_part_id,)).fetchone(); value = max(0, int(row[0]) + direction * delta)
+        self.conn.execute("UPDATE parts SET stock_quantity=?, updated_at=? WHERE id=?", (value, datetime.now().isoformat(timespec="seconds"), self.selected_part_id)); self.conn.commit()
+        self.part_vars["quantity"].set(str(value)); self.refresh_parts_table(); self.sync_to_cloud(); self.show_toast("库存已更新")
+
+    def delete_part(self):
+        if not self.selected_part_id: return
+        if not messagebox.askyesno("确认删除", "删除此零件会同时从机器构成中移除它，是否继续？", parent=self): return
+        self.conn.execute("DELETE FROM machine_parts WHERE part_id=?", (self.selected_part_id,)); self.conn.execute("DELETE FROM parts WHERE id=?", (self.selected_part_id,)); self.conn.commit()
+        self.selected_part_id = None
+        for value in self.part_vars.values(): value.set("")
+        self.part_vars["unit"].set("件"); self.refresh_parts_table(); self.sync_to_cloud()
+
+    def open_machines(self):
+        self._set_active_nav("machines")
+        if hasattr(self, "machines_page") and self.machines_page.winfo_exists():
+            self._show_page(self.machines_page); self.refresh_machines(); return
+        page = tk.Frame(self.page_host, bg="#f5f7fb", padx=34, pady=28); self.machines_page = page; self._show_page(page)
+        page.columnconfigure(0, weight=1); page.columnconfigure(1, weight=2); page.rowconfigure(2, weight=1)
+        tk.Label(page, text="机器构成", bg="#f5f7fb", fg="#172033", font=("Microsoft YaHei UI", 22, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        tk.Label(page, text="选择已有零件定义机器；订单产品可直接选择这里创建的机器。", bg="#f5f7fb", fg="#64748b", font=("Microsoft YaHei UI", 9)).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 16))
+        left = tk.Frame(page, bg="white", padx=18, pady=16, highlightthickness=1, highlightbackground="#e2e8f0"); left.grid(row=2, column=0, sticky="nsew", padx=(0, 16)); left.columnconfigure(0, weight=1); left.rowconfigure(3, weight=1)
+        self.machine_vars = {key: tk.StringVar() for key in ("name", "model", "notes", "part", "part_quantity")}; self.machine_vars["part_quantity"].set("1")
+        for row, (text, key) in enumerate((("机器名称 *", "name"), ("型号 / 说明", "model"), ("备注", "notes"))):
+            tk.Label(left, text=text, bg="white", fg="#536177", font=("Microsoft YaHei UI", 9)).grid(row=row*2, column=0, sticky="w", pady=(0, 5))
+            ttk.Entry(left, textvariable=self.machine_vars[key]).grid(row=row*2+1, column=0, sticky="ew", pady=(0, 10), ipady=5)
+        tk.Button(left, text="保存机器", command=self.save_machine, bg="#2563eb", fg="white", relief="flat", bd=0, padx=14, pady=8, cursor="hand2").grid(row=6, column=0, sticky="w", pady=(2, 12))
+        self.machines_tree = ttk.Treeview(left, columns=("name", "model"), show="headings", selectmode="browse", height=10)
+        self.machines_tree.heading("name", text="自定义机器"); self.machines_tree.heading("model", text="型号 / 说明"); self.machines_tree.column("name", width=150); self.machines_tree.column("model", width=150)
+        self.machines_tree.grid(row=7, column=0, sticky="nsew"); self.machines_tree.bind("<<TreeviewSelect>>", self.load_selected_machine)
+        right = tk.Frame(page, bg="white", padx=18, pady=16, highlightthickness=1, highlightbackground="#e2e8f0"); right.grid(row=2, column=1, sticky="nsew"); right.columnconfigure(0, weight=1); right.rowconfigure(3, weight=1)
+        tk.Label(right, text="所需配件", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        add = tk.Frame(right, bg="white"); add.grid(row=1, column=0, sticky="ew", pady=12); add.columnconfigure(0, weight=1)
+        self.machine_part_combo = ttk.Combobox(add, textvariable=self.machine_vars["part"], values=self.get_part_names(), state="readonly"); self.machine_part_combo.grid(row=0, column=0, sticky="ew", ipady=4)
+        ttk.Entry(add, textvariable=self.machine_vars["part_quantity"], width=9).grid(row=0, column=1, padx=8, ipady=4)
+        tk.Button(add, text="加入配件", command=self.add_machine_part, bg="#e0f2fe", fg="#0369a1", relief="flat", bd=0, padx=12, pady=7, cursor="hand2").grid(row=0, column=2)
+        self.machine_parts_tree = ttk.Treeview(right, columns=("part", "quantity", "stock"), show="headings", selectmode="browse")
+        for key, title, width in (("part", "零件", 230), ("quantity", "每台需求", 110), ("stock", "现有库存", 110)):
+            self.machine_parts_tree.heading(key, text=title); self.machine_parts_tree.column(key, width=width, anchor="center" if key != "part" else "w")
+        self.machine_parts_tree.grid(row=3, column=0, sticky="nsew")
+        tk.Button(right, text="移除选中配件", command=self.remove_machine_part, bg="#fff1f2", fg="#be123c", relief="flat", bd=0, padx=12, pady=8, cursor="hand2").grid(row=4, column=0, sticky="w", pady=(12, 0))
+        self.selected_machine_id = None; self.refresh_machines()
+
+    def get_part_names(self): return [row[0] for row in self.conn.execute("SELECT name FROM parts ORDER BY name").fetchall()]
+
+    def refresh_machines(self):
+        if not hasattr(self, "machines_tree"): return
+        self.machines_tree.delete(*self.machines_tree.get_children())
+        for row in self.conn.execute("SELECT * FROM machines ORDER BY name").fetchall(): self.machines_tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["model"] or ""))
+        self.machine_part_combo.configure(values=self.get_part_names())
+        if self.selected_machine_id: self.refresh_machine_parts()
+
+    def load_selected_machine(self, _event=None):
+        selected = self.machines_tree.selection()
+        if not selected: return
+        self.selected_machine_id = int(selected[0]); row = self.conn.execute("SELECT * FROM machines WHERE id=?", (self.selected_machine_id,)).fetchone()
+        self.machine_vars["name"].set(row["name"]); self.machine_vars["model"].set(row["model"] or ""); self.machine_vars["notes"].set(row["notes"] or ""); self.refresh_machine_parts()
+
+    def save_machine(self):
+        name = self.machine_vars["name"].get().strip()
+        if not name: messagebox.showwarning("请填写名称", "请输入机器名称。", parent=self); return
+        now = datetime.now().isoformat(timespec="seconds")
+        try:
+            if self.selected_machine_id: self.conn.execute("UPDATE machines SET name=?, model=?, notes=?, updated_at=? WHERE id=?", (name, self.machine_vars["model"].get().strip(), self.machine_vars["notes"].get().strip(), now, self.selected_machine_id))
+            else:
+                cursor = self.conn.execute("INSERT INTO machines(name, model, notes, updated_at) VALUES (?, ?, ?, ?)", (name, self.machine_vars["model"].get().strip(), self.machine_vars["notes"].get().strip(), now)); self.selected_machine_id = cursor.lastrowid
+        except sqlite3.IntegrityError: messagebox.showwarning("名称重复", "已有同名机器，请修改后保存。", parent=self); return
+        self.conn.commit(); self.refresh_machines(); self.refresh_machine_choices(); self.sync_to_cloud(); self.show_toast("机器构成已保存")
+
+    def add_machine_part(self):
+        if not self.selected_machine_id: messagebox.showwarning("先保存机器", "请先保存或选择一台机器。", parent=self); return
+        part_name = self.machine_vars["part"].get()
+        try: quantity = int(self.machine_vars["part_quantity"].get())
+        except ValueError: quantity = 0
+        part = self.conn.execute("SELECT id FROM parts WHERE name=?", (part_name,)).fetchone()
+        if not part or quantity < 1: messagebox.showwarning("配件不正确", "请选择已创建的配件并输入至少 1 的需求数量。", parent=self); return
+        self.conn.execute("INSERT INTO machine_parts(machine_id, part_id, quantity) VALUES (?, ?, ?) ON CONFLICT(machine_id, part_id) DO UPDATE SET quantity=excluded.quantity", (self.selected_machine_id, part[0], quantity)); self.conn.commit(); self.refresh_machine_parts(); self.sync_to_cloud()
+
+    def refresh_machine_parts(self):
+        if not hasattr(self, "machine_parts_tree"): return
+        self.machine_parts_tree.delete(*self.machine_parts_tree.get_children())
+        rows = self.conn.execute("SELECT mp.id, p.name, mp.quantity, p.stock_quantity FROM machine_parts mp JOIN parts p ON p.id=mp.part_id WHERE mp.machine_id=? ORDER BY p.name", (self.selected_machine_id,)).fetchall()
+        for row in rows: self.machine_parts_tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["quantity"], row["stock_quantity"]))
+
+    def remove_machine_part(self):
+        selected = self.machine_parts_tree.selection()
+        if not selected: return
+        self.conn.execute("DELETE FROM machine_parts WHERE id=?", (int(selected[0]),)); self.conn.commit(); self.refresh_machine_parts(); self.sync_to_cloud()
+
     def open_stocking(self):
-        self.nav_order.configure(bg="#172033", fg="#97a4ba")
-        self.nav_stock.configure(bg="#253657", fg="white")
-        self.nav_stats.configure(bg="#172033", fg="#97a4ba")
+        self._set_active_nav("stock")
         if hasattr(self, "stocking_page") and self.stocking_page.winfo_exists():
             self._show_page(self.stocking_page)
             self.refresh_stocking_table()
@@ -889,6 +1180,44 @@ class DeliveryApp(tk.Tk):
     def select_stock_card(self, item_id):
         self.stock_selected_id = item_id
         self.refresh_stocking_table()
+        self.show_stock_detail(item_id)
+
+    def _order_parts_readiness(self, item_id):
+        row = self.conn.execute("""SELECT s.*, r.product FROM stocking_items s JOIN records r ON r.id=s.record_id WHERE s.id=?""", (item_id,)).fetchone()
+        if not row: return None, []
+        machine = self.conn.execute("SELECT id, name FROM machines WHERE name=?", (row["product"],)).fetchone()
+        if not machine: return row, []
+        amount = max(1, int(float(row["quantity"] or 1)))
+        parts = self.conn.execute("""SELECT p.name, p.unit, p.stock_quantity, mp.quantity AS per_machine
+            FROM machine_parts mp JOIN parts p ON p.id=mp.part_id WHERE mp.machine_id=? ORDER BY p.name""", (machine["id"],)).fetchall()
+        return row, [{"name": part["name"], "unit": part["unit"], "stock": int(part["stock_quantity"]), "need": int(part["per_machine"]) * amount} for part in parts]
+
+    def show_stock_detail(self, item_id):
+        row, parts = self._order_parts_readiness(item_id)
+        if not row: return
+        dialog = tk.Toplevel(self); dialog.title("备货详情"); dialog.transient(self); dialog.configure(bg="#f5f7fb")
+        width, height = min(540, self.winfo_screenwidth() - 40), min(720, self.winfo_screenheight() - 80)
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - width) // 2); y = self.winfo_rooty() + max(0, (self.winfo_height() - height) // 2)
+        x = max(20, min(x, self.winfo_screenwidth() - width - 20)); y = max(20, min(y, self.winfo_screenheight() - height - 40))
+        dialog.geometry(f"{width}x{height}+{x}+{y}"); dialog.minsize(420, 560); dialog.grab_set()
+        head = tk.Frame(dialog, bg="#172b4d", padx=24, pady=22); head.pack(fill="x")
+        tk.Label(head, text="备货详情", bg="#172b4d", fg="white", font=("Microsoft YaHei UI", 17, "bold")).pack(anchor="w")
+        tk.Label(head, text=f"{row['customer']}  ·  {row['product']}  ·  订单数量 {row['quantity'] or '1'}", bg="#172b4d", fg="#c8d7ef", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(5, 0))
+        box = tk.Frame(dialog, bg="white", padx=22, pady=18); box.pack(fill="both", expand=True, padx=18, pady=18)
+        tk.Label(box, text="所需备件", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
+        if not parts:
+            tk.Label(box, text="这条订单尚未选择已定义机器，或该机器还没有配置配件。\n请先在“机器构成”中创建对应机器与所需零件。", bg="white", fg="#64748b", justify="left", font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=30)
+        else:
+            ready = all(part["stock"] >= part["need"] for part in parts)
+            tk.Label(box, text="✓ 库存满足，可进行备货" if ready else "✕ 有零件库存不足，请先补充库存", bg="white", fg="#059669" if ready else "#dc2626", font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", pady=(7, 14))
+            for part in parts:
+                enough = part["stock"] >= part["need"]; missing = max(0, part["need"] - part["stock"])
+                item = tk.Frame(box, bg="#f8fafc", padx=14, pady=12, highlightthickness=1, highlightbackground="#e2e8f0"); item.pack(fill="x", pady=(0, 8))
+                tk.Label(item, text="✓" if enough else "✕", bg="#f8fafc", fg="#16a34a" if enough else "#dc2626", font=("Segoe UI", 16, "bold")).pack(side="left")
+                tk.Label(item, text=part["name"], bg="#f8fafc", fg="#172033", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left", padx=9)
+                text = f"需 {part['need']} {part['unit']} · 库存 {part['stock']} {part['unit']}" + (f" · 缺 {missing}" if not enough else "")
+                tk.Label(item, text=text, bg="#f8fafc", fg="#64748b" if enough else "#dc2626", font=("Microsoft YaHei UI", 9)).pack(side="right")
+        tk.Button(dialog, text="关闭", command=dialog.destroy, bg="#2563eb", fg="white", relief="flat", bd=0, padx=22, pady=9, cursor="hand2").pack(pady=(0, 18))
 
     def set_stock_filter(self, value):
         self.stock_filter = value
@@ -901,10 +1230,16 @@ class DeliveryApp(tk.Tk):
             return
         row = self.conn.execute("SELECT stock_status, record_id FROM stocking_items WHERE id=?", (item_id,)).fetchone()
         next_status = "待备货" if row and row["stock_status"] == "已备货" else "已备货"
+        if next_status == "已备货":
+            _order, parts = self._order_parts_readiness(item_id)
+            insufficient = [part["name"] for part in parts if part["stock"] < part["need"]]
+            if insufficient:
+                messagebox.showwarning("库存不足", "以下零件库存不足，暂不能标记为已备货：\n" + "、".join(insufficient), parent=self)
+                return
         self.conn.execute("UPDATE stocking_items SET stock_status=?, updated_at=? WHERE id=?", (next_status, datetime.now().isoformat(timespec="seconds"), item_id))
         if next_status == "已备货":
             self.conn.execute("UPDATE records SET status='待发货' WHERE id=? AND status NOT IN ('已发货', '已取消', '已撤销')", (row["record_id"],))
-        self.conn.commit(); self.refresh_all_data()
+        self.conn.commit(); self.refresh_all_data(); self.sync_to_cloud()
         self.show_toast("备货状态已更新为“" + next_status + "”")
 
     def ship_selected_order(self):
@@ -921,7 +1256,7 @@ class DeliveryApp(tk.Tk):
             return
         self.conn.execute("UPDATE records SET status='已发货', shipping_at=? WHERE id=?", (datetime.now().isoformat(timespec="seconds"), record_id))
         self.conn.commit()
-        self.clear_form(); self.refresh_all_data()
+        self.clear_form(); self.refresh_all_data(); self.sync_to_cloud()
         self.show_toast(f"已发货：{row['customer']} · {row['product']}")
 
     def revoke_selected_order(self):
@@ -942,14 +1277,11 @@ class DeliveryApp(tk.Tk):
         self.conn.execute("UPDATE records SET status='已撤销' WHERE id=?", (record_id,))
         self.conn.execute("UPDATE stocking_items SET stock_status='已撤销', updated_at=? WHERE record_id=?", (now, record_id))
         self.conn.commit()
-        self.clear_form(); self.refresh_all_data()
+        self.clear_form(); self.refresh_all_data(); self.sync_to_cloud()
         self.show_toast(f"订单已撤销：{row['customer']} · {row['product']}")
 
     def open_shipped(self):
-        self.nav_order.configure(bg="#172033", fg="#97a4ba")
-        self.nav_stock.configure(bg="#172033", fg="#97a4ba")
-        self.nav_stats.configure(bg="#172033", fg="#97a4ba")
-        self.nav_shipped.configure(bg="#253657", fg="white")
+        self._set_active_nav("shipped")
         if hasattr(self, "shipped_page") and self.shipped_page.winfo_exists():
             self._show_page(self.shipped_page)
             self.refresh_shipped_table(); return
@@ -987,10 +1319,7 @@ class DeliveryApp(tk.Tk):
 
     def show_orders(self):
         self._show_page(self.body)
-        self.nav_order.configure(bg="#253657", fg="white")
-        self.nav_stock.configure(bg="#172033", fg="#97a4ba")
-        self.nav_stats.configure(bg="#172033", fg="#97a4ba")
-        self.nav_shipped.configure(bg="#172033", fg="#97a4ba")
+        self._set_active_nav("order")
 
     def render_statistics(self, period):
         self.stat_period.set(period)
@@ -1075,12 +1404,16 @@ class DeliveryApp(tk.Tk):
         is_new = not self.selected_id
         if self.selected_id:
             self.conn.execute(f"UPDATE records SET {', '.join(f'{c}=?' for c in columns.split(', '))} WHERE id=?", params + (self.selected_id,))
+            self.conn.execute("UPDATE stocking_items SET customer=?, product=?, spec=?, quantity=?, delivery_date=?, updated_at=? WHERE record_id=?", (values["customer"], values["product"], values["spec"], values["quantity"], values["delivery_date"], datetime.now().isoformat(timespec="seconds"), self.selected_id))
             notice = "订单已更新。"
         else:
-            self.conn.execute(f"INSERT INTO records ({columns}, created_at) VALUES ({','.join('?' * 10)}, ?)", params + (datetime.now().isoformat(timespec="seconds"),))
+            now = datetime.now().isoformat(timespec="seconds")
+            cursor = self.conn.execute(f"INSERT INTO records ({columns}, created_at) VALUES ({','.join('?' * 10)}, ?)", params + (now,))
+            self.conn.execute("INSERT INTO stocking_items(record_id, customer, product, spec, quantity, delivery_date, stock_status, updated_at) VALUES (?, ?, ?, ?, ?, ?, '待备货', ?)", (cursor.lastrowid, values["customer"], values["product"], values["spec"], values["quantity"], values["delivery_date"], now))
             notice = "订单已保存。"
         self.conn.commit()
         self.refresh_table()
+        self.sync_to_cloud()
         self.clear_form()
         self.show_toast(notice)
         if is_new:
@@ -1213,6 +1546,7 @@ class DeliveryApp(tk.Tk):
         self.conn.commit()
         self.clear_form()
         self.refresh_all_data()
+        self.sync_to_cloud()
 
     def export_csv(self):
         destination = filedialog.asksaveasfilename(title="导出订单", defaultextension=".csv",
@@ -1332,14 +1666,17 @@ class DeliveryApp(tk.Tk):
         self.show_toast("正在通过设备扬声器播放三声测试铃声")
 
     def logout(self):
-        if not messagebox.askyesno("退出登录", "退出后下次打开软件需要重新登录。", parent=self):
+        if not messagebox.askyesno("退出登录", "退出后下次打开软件需要重新登录云端账户。", parent=self):
             return
         SESSION_PATH.unlink(missing_ok=True)
+        self.cloud_token = None
         self.withdraw()
-        dialog = LoginDialog(self)
+        dialog = CloudLoginDialog(self)
         self.wait_window(dialog)
         if dialog.success:
+            self.cloud_token = dialog.token
             self.deiconify()
+            self.sync_from_cloud()
         else:
             self.on_close()
 
