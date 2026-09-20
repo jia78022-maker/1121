@@ -39,7 +39,7 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 CLOUD_API_BASE = "https://api.songpornsongx.top"
@@ -240,7 +240,7 @@ class DeliveryApp(tk.Tk):
         ("产品型号 / 规格", "spec", False),
         ("数量", "quantity", False),
         ("产品单价", "price", False),
-        ("交货期限", "delivery_date", True),
+        ("交货天数", "delivery_days", True),
         ("订单状态", "status", False),
     ]
 
@@ -248,7 +248,7 @@ class DeliveryApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.title("客户管理器")
-        self.minsize(860, 620)
+        self.minsize(620, 500)
         self.center_window(1440, 900)
         self.configure(bg="#f4f7fb")
         self.ui_settings = load_ui_settings()
@@ -621,8 +621,10 @@ class DeliveryApp(tk.Tk):
         form = tk.Frame(body, bg="white", padx=24, pady=20, highlightthickness=1, highlightbackground="#e5eaf1")
         form.grid(row=2, column=0, sticky="ew")
         self.form = form
-        tk.Label(form, text="新建订单", bg="white", fg="#172033", font=("Microsoft YaHei UI", 13, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(form, text="填写必要信息后保存，系统会自动追踪交货时间。", bg="white", fg="#7b879b", font=("Microsoft YaHei UI", 9)).grid(row=0, column=1, columnspan=2, sticky="w", padx=14)
+        self.form_title = tk.Label(form, text="新建订单", bg="white", fg="#172033", font=("Microsoft YaHei UI", 13, "bold"))
+        self.form_title.grid(row=0, column=0, sticky="w")
+        self.form_hint = tk.Label(form, text="填写必要信息后保存，系统会自动追踪交货时间。", bg="white", fg="#7b879b", font=("Microsoft YaHei UI", 9))
+        self.form_hint.grid(row=0, column=1, columnspan=2, sticky="w", padx=14)
         for col in range(3): form.columnconfigure(col, weight=1)
         self.field_slots = []
         for index, (label, key, required) in enumerate(self.FIELDS):
@@ -639,9 +641,12 @@ class DeliveryApp(tk.Tk):
                 field = ttk.Combobox(slot, values=self.get_machine_names(), state="normal", font=("Microsoft YaHei UI", 10))
             else:
                 field = ttk.Entry(slot, font=("Microsoft YaHei UI", 10))
-                if key == "delivery_date": field.insert(0, date.today().isoformat())
             field.pack(fill="x", ipady=5)
             self.entries[key] = field
+            if key == "delivery_days":
+                self.delivery_preview = tk.Label(slot, text="预计交期：请先输入天数", bg="white", fg="#64748b", font=("Microsoft YaHei UI", 8))
+                self.delivery_preview.pack(anchor="w", pady=(5, 0))
+                field.bind("<KeyRelease>", lambda _event: self.refresh_delivery_preview())
         note_row = 1 + (len(self.FIELDS) + 2) // 3
         self.note_label = tk.Label(form, text="备注", bg="white", fg="#536177", font=("Microsoft YaHei UI", 9))
         self.note_label.grid(row=note_row, column=0, sticky="w", pady=(18, 6))
@@ -681,11 +686,13 @@ class DeliveryApp(tk.Tk):
             self.tree.heading(col, text=heading)
             self.tree.column(col, width=width, minwidth=55, anchor="center" if col in ("id", "quantity", "delivery_date", "status") else "w")
         scrollbar = ttk.Scrollbar(records, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        xscrollbar = ttk.Scrollbar(records, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=xscrollbar.set)
         self.tree.tag_configure("zebra", background="#f8fafc")
         self.tree.tag_configure("shipped", background="#f1f5f9", foreground="#94a3b8")
         self.tree.grid(row=2, column=0, sticky="nsew", pady=(16, 0))
         scrollbar.grid(row=2, column=1, sticky="ns", pady=(16, 0))
+        xscrollbar.grid(row=3, column=0, sticky="ew")
         self.card_widgets = [self.form, self.table_box, *self.stat_cards]
         self.tree.bind("<<TreeviewSelect>>", self.load_selected)
 
@@ -831,7 +838,7 @@ class DeliveryApp(tk.Tk):
         """在窄窗口中保留完整信息：收起导航并将表单由三列自动重排为两列。"""
         if event.widget is not self or not hasattr(self, "sidebar"):
             return
-        compact = event.width < 1080
+        compact = event.width < 980
         sidebar_width = 68 if compact else 224
         self.sidebar.configure(width=sidebar_width)
         self.brand_mark.configure(text="客" if compact else "Q期")
@@ -842,16 +849,26 @@ class DeliveryApp(tk.Tk):
             button.configure(text=text if compact else "   " + {"订单": "订单管理", "备货": "备货单", "库存": "零件库存", "机器": "机器构成", "发货": "已发货", "统计": "数据统计"}[text], anchor="center" if compact else "w")
         if not hasattr(self, "field_slots"):
             return
-        columns = 2 if compact else 3
+        # 三档重排：大窗三列、普通小窗两列、窄窗一列，确保表单控件不被挤出屏幕。
+        available = event.width - sidebar_width
+        columns = 1 if available < 650 else (2 if available < 1050 else 3)
         if columns == getattr(self, "_form_columns", None):
             return
         self._form_columns = columns
+        if columns == 1:
+            self.form_title.grid_configure(row=0, column=0, columnspan=1, sticky="w")
+            self.form_hint.grid_configure(row=1, column=0, columnspan=1, sticky="w", padx=0, pady=(5, 0))
+            field_row_offset = 2
+        else:
+            self.form_title.grid_configure(row=0, column=0, columnspan=1, sticky="w")
+            self.form_hint.grid_configure(row=0, column=1, columnspan=columns - 1, sticky="w", padx=14, pady=0)
+            field_row_offset = 1
         for index, slot in enumerate(self.field_slots):
             row, column = divmod(index, columns)
-            slot.grid_configure(row=row + 1, column=column, padx=(0, 12) if column < columns - 1 else 0)
+            slot.grid_configure(row=row + field_row_offset, column=column, padx=(0, 12) if column < columns - 1 else 0)
         for column in range(3):
             self.form.columnconfigure(column, weight=1 if column < columns else 0)
-        note_row = 1 + (len(self.field_slots) + columns - 1) // columns
+        note_row = field_row_offset + (len(self.field_slots) + columns - 1) // columns
         self.note_label.grid_configure(row=note_row, column=0)
         self.notes.grid_configure(row=note_row + 1, column=0, columnspan=columns)
         self.order_actions.grid_configure(row=note_row + 2, column=0, columnspan=columns)
@@ -1387,6 +1404,29 @@ class DeliveryApp(tk.Tk):
     def values_from_form(self):
         return {key: self.entries[key].get().strip() for _label, key, _required in self.FIELDS}
 
+    def refresh_delivery_preview(self):
+        """交期以“今天 + 天数”计算，避免手动填写日期造成误差。"""
+        if not hasattr(self, "delivery_preview"):
+            return
+        raw = self.entries["delivery_days"].get().strip()
+        try:
+            days = int(raw)
+            if days < 0:
+                raise ValueError
+            due = date.today() + timedelta(days=days)
+            self.delivery_preview.configure(text=f"预计交期：{due:%Y-%m-%d}（今天 + {days} 天）", fg="#2563eb")
+        except ValueError:
+            self.delivery_preview.configure(text="预计交期：请输入不小于 0 的整数天数", fg="#dc2626" if raw else "#64748b")
+
+    def set_delivery_days_from_date(self, delivery_date):
+        try:
+            due = datetime.strptime(delivery_date, "%Y-%m-%d").date()
+            self.entries["delivery_days"].delete(0, "end")
+            self.entries["delivery_days"].insert(0, str(max(0, (due - date.today()).days)))
+        except (ValueError, TypeError):
+            self.entries["delivery_days"].delete(0, "end")
+        self.refresh_delivery_preview()
+
     def save_record(self):
         values = self.values_from_form()
         values["notes"] = self.notes.get("1.0", "end").strip()
@@ -1395,10 +1435,13 @@ class DeliveryApp(tk.Tk):
             messagebox.showwarning("请补全信息", "请填写：" + "、".join(missing))
             return
         try:
-            datetime.strptime(values["delivery_date"], "%Y-%m-%d")
+            delivery_days = int(values["delivery_days"])
+            if delivery_days < 0:
+                raise ValueError
         except ValueError:
-            messagebox.showwarning("日期格式不正确", "交货期限请按 YYYY-MM-DD 格式填写，例如 2026-10-08。")
+            messagebox.showwarning("交货天数不正确", "请输入不小于 0 的整数，例如 3 表示今天起 3 天后交货。", parent=self)
             return
+        values["delivery_date"] = (date.today() + timedelta(days=delivery_days)).isoformat()
         columns = "customer, contact, phone, product, spec, quantity, price, delivery_date, status, notes"
         params = tuple(values[key] for key in ("customer", "contact", "phone", "product", "spec", "quantity", "price", "delivery_date", "status", "notes"))
         is_new = not self.selected_id
@@ -1514,6 +1557,9 @@ class DeliveryApp(tk.Tk):
         row = self.conn.execute("SELECT * FROM records WHERE id=?", (self.selected_id,)).fetchone()
         for _label, key, _required in self.FIELDS:
             field = self.entries[key]
+            if key == "delivery_days":
+                self.set_delivery_days_from_date(row["delivery_date"])
+                continue
             if isinstance(field, ttk.Combobox):
                 field.set(row[key] or "待交付")
             else:
@@ -1526,11 +1572,11 @@ class DeliveryApp(tk.Tk):
         self.selected_id = None
         for _label, key, _required in self.FIELDS:
             field = self.entries[key]
-            if isinstance(field, ttk.Combobox):
+            if key == "status":
                 field.set("待交付")
             else:
                 field.delete(0, "end")
-        self.entries["delivery_date"].insert(0, date.today().isoformat())
+        self.refresh_delivery_preview()
         self.notes.delete("1.0", "end")
         for item in self.tree.selection():
             self.tree.selection_remove(item)
