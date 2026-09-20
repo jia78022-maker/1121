@@ -10,6 +10,7 @@ Set-Location $root
 if (-not $env:GITHUB_TOKEN) {
     $env:GITHUB_TOKEN = [Environment]::GetEnvironmentVariable("GITHUB_TOKEN", "User")
 }
+$authenticatedRemote = "https://x-access-token:$env:GITHUB_TOKEN@github.com/$repo.git"
 if (-not $env:GITHUB_TOKEN) {
     throw "未检测到 GITHUB_TOKEN。请先在 Windows 用户环境变量中设置一个具有仓库 Contents: Read and write 权限的 GitHub Fine-grained token，然后重新打开 PowerShell。"
 }
@@ -34,7 +35,7 @@ git add app.py create_icon.py 客户管理器.ico 客户管理器图标.png serv
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
     git commit -m "release: 客户管理器 v$Version"
-    git push origin main
+    git push $authenticatedRemote main
 }
 
 $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
