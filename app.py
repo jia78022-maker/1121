@@ -39,7 +39,7 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.4"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 CLOUD_API_BASE = "https://api.songpornsongx.top"
@@ -739,6 +739,10 @@ class DeliveryApp(tk.Tk):
         style.map("Accent.TButton", background=[("active", palette["accent_active"]), ("pressed", palette["accent_active"])])
         self.theme_button.configure(text="☀  浅色模式" if self.theme_name == "dark" else "◐  切换深浅色")
         self._apply_widget_palette(self.body, palette)
+        for page_name in ("statistics_page", "stocking_page", "parts_page", "machines_page", "shipped_page"):
+            page = getattr(self, page_name, None)
+            if page is not None and page.winfo_exists():
+                self._apply_surface_theme(page)
         self.table_box.configure(bg=palette["surface"], highlightbackground=palette["border"])
         self.notes.configure(bg=palette["surface"], fg=palette["text"], insertbackground=palette["text"], highlightbackground=palette["border"])
         self.tree.column("price", width=88 if self.price_visible else 0, minwidth=0, stretch=self.price_visible)
@@ -760,6 +764,39 @@ class DeliveryApp(tk.Tk):
             elif isinstance(child, tk.Label):
                 child.configure(bg=palette["surface"] if card_context else palette["bg"], fg=palette["text"] if card_context else palette["muted"])
             self._apply_widget_palette(child, palette)
+
+    def _apply_surface_theme(self, root):
+        """Apply the same restrained blue operations palette to every lazily-built page."""
+        palette = THEMES[self.theme_name]
+        backgrounds = {
+            "#f5f7fb": palette["bg"], "#f6f8fc": palette["bg"], "#f8fafc": palette["bg"],
+            "#edf2f8": palette["head"], "#eaf0f8": palette["head"], "#ffffff": palette["surface"], "white": palette["surface"],
+            "#111827": palette["bg"], "#1f2937": palette["surface"], "#273548": palette["head"],
+        }
+        foregrounds = {
+            "#172033": palette["text"], "#334155": palette["text"], "#64748b": palette["muted"],
+            "#7b879b": palette["muted"], "#94a3b8": palette["muted"], "#536177": palette["muted"],
+            "#f1f5f9": palette["text"], "#a8b5c7": palette["muted"],
+        }
+        borders = {"#e2e8f0", "#e5eaf1", "#e6eaf0", "#dfe7f1", "#374151"}
+        def visit(widget):
+            try:
+                bg = widget.cget("bg")
+                if bg in backgrounds: widget.configure(bg=backgrounds[bg])
+            except (tk.TclError, KeyError):
+                pass
+            try:
+                fg = widget.cget("fg")
+                if fg in foregrounds: widget.configure(fg=foregrounds[fg])
+            except (tk.TclError, KeyError):
+                pass
+            try:
+                border = widget.cget("highlightbackground")
+                if border in borders: widget.configure(highlightbackground=palette["border"])
+            except tk.TclError:
+                pass
+            for child in widget.winfo_children(): visit(child)
+        visit(root)
 
     def _is_in_card(self, widget):
         parent = widget.master
@@ -887,6 +924,7 @@ class DeliveryApp(tk.Tk):
             if candidate is not None and candidate.winfo_exists():
                 candidate.place_forget()
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._apply_surface_theme(page)
         page.lift()
 
     def open_statistics(self):
@@ -931,6 +969,7 @@ class DeliveryApp(tk.Tk):
         self.chart_canvas.pack(fill="both", expand=True)
         self.chart_canvas.bind("<Configure>", lambda _event: self.draw_chart())
         self.render_statistics("month")
+        self._apply_surface_theme(main)
 
     def _set_active_nav(self, active):
         for name in ("order", "stock", "parts", "machines", "shipped", "stats"):
@@ -965,30 +1004,70 @@ class DeliveryApp(tk.Tk):
             ttk.Entry(box, textvariable=self.part_vars[key], font=("Microsoft YaHei UI", 10)).pack(fill="x", ipady=5)
         actions = tk.Frame(editor, bg="white"); actions.grid(row=1, column=0, columnspan=4, sticky="w", pady=(14, 0))
         tk.Button(actions, text="保存零件", command=self.save_part, bg="#2563eb", fg="white", relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left")
-        tk.Button(actions, text="库存 +", command=lambda: self.adjust_part_stock(1), relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left", padx=8)
+        tk.Button(actions, text="批量添加", command=self.open_bulk_parts_dialog, bg="#e8f1fd", fg="#2459a6", relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left", padx=8)
+        tk.Button(actions, text="库存 +", command=lambda: self.adjust_part_stock(1), relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left")
         tk.Button(actions, text="库存 −", command=lambda: self.adjust_part_stock(-1), relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left")
         tk.Button(actions, text="删除零件", command=self.delete_part, bg="#fff1f2", fg="#be123c", relief="flat", bd=0, padx=15, pady=8, cursor="hand2").pack(side="left", padx=8)
         card = tk.Frame(page, bg="white", padx=18, pady=16, highlightthickness=1, highlightbackground="#e2e8f0"); card.grid(row=3, column=0, sticky="nsew")
-        card.columnconfigure(0, weight=1); card.rowconfigure(1, weight=1)
-        tk.Label(card, text="自定义零件", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
-        self.parts_tree = ttk.Treeview(card, columns=("name", "quantity", "unit", "notes"), show="headings", selectmode="browse")
-        for key, title, width in (("name", "零件", 220), ("quantity", "库存", 120), ("unit", "单位", 100), ("notes", "备注", 330)):
-            self.parts_tree.heading(key, text=title); self.parts_tree.column(key, width=width, anchor="center" if key in ("quantity", "unit") else "w")
-        scroll = ttk.Scrollbar(card, orient="vertical", command=self.parts_tree.yview); self.parts_tree.configure(yscrollcommand=scroll.set)
-        self.parts_tree.grid(row=1, column=0, sticky="nsew"); scroll.grid(row=1, column=1, sticky="ns")
-        self.parts_tree.bind("<<TreeviewSelect>>", self.load_selected_part); self.selected_part_id = None; self.refresh_parts_table()
+        card.columnconfigure(0, weight=1); card.rowconfigure(2, weight=1)
+        board_head = tk.Frame(card, bg="white"); board_head.grid(row=0, column=0, sticky="ew", pady=(0, 9))
+        tk.Label(board_head, text="库存看板", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).pack(side="left")
+        self.parts_board_caption = tk.Label(board_head, text="", bg="white", fg="#64748b", font=("Microsoft YaHei UI", 9)); self.parts_board_caption.pack(side="left", padx=12)
+        tk.Label(card, text="点击任意零件卡片即可编辑或加减库存；阈值：0 为缺货，1–10 为偏低。", bg="white", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).grid(row=1, column=0, sticky="w", pady=(0, 10))
+        self.parts_canvas = tk.Canvas(card, bg="#f6f8fc", highlightthickness=0)
+        scroll = ttk.Scrollbar(card, orient="vertical", command=self.parts_canvas.yview); self.parts_canvas.configure(yscrollcommand=scroll.set)
+        self.parts_board = tk.Frame(self.parts_canvas, bg="#f6f8fc")
+        self.parts_board_window = self.parts_canvas.create_window((0, 0), window=self.parts_board, anchor="nw")
+        self.parts_board.bind("<Configure>", lambda _event: self.parts_canvas.configure(scrollregion=self.parts_canvas.bbox("all")))
+        self.parts_canvas.bind("<Configure>", lambda event: self.parts_canvas.itemconfigure(self.parts_board_window, width=event.width))
+        self.parts_canvas.grid(row=2, column=0, sticky="nsew"); scroll.grid(row=2, column=1, sticky="ns")
+        self.selected_part_id = None; self.refresh_parts_table()
 
     def refresh_parts_table(self):
-        if not hasattr(self, "parts_tree"): return
-        self.parts_tree.delete(*self.parts_tree.get_children())
-        for row in self.conn.execute("SELECT * FROM parts ORDER BY name").fetchall():
-            self.parts_tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["stock_quantity"], row["unit"], row["notes"] or ""))
+        if not hasattr(self, "parts_board"): return
+        for child in self.parts_board.winfo_children(): child.destroy()
+        rows = self.conn.execute("SELECT * FROM parts ORDER BY name").fetchall()
+        groups = (("缺货", "库存为 0", "#ef4444", [row for row in rows if int(row["stock_quantity"]) == 0]),
+                  ("偏低", "库存 1–10", "#f59e0b", [row for row in rows if 0 < int(row["stock_quantity"]) <= 10]),
+                  ("充足", "库存大于 10", "#10b981", [row for row in rows if int(row["stock_quantity"]) > 10]))
+        for column, (title, hint, color, items) in enumerate(groups):
+            self.parts_board.columnconfigure(column, weight=1, uniform="stock-lanes")
+            lane = tk.Frame(self.parts_board, bg="#edf2f8", padx=10, pady=10)
+            lane.grid(row=0, column=column, sticky="nsew", padx=(0, 9) if column < 2 else 0, pady=0)
+            head = tk.Frame(lane, bg="#edf2f8"); head.pack(fill="x")
+            tk.Label(head, text=title, bg="#edf2f8", fg=color, font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+            tk.Label(head, text=str(len(items)), bg=color, fg="white", font=("Segoe UI", 8, "bold"), padx=7, pady=2).pack(side="right")
+            tk.Label(lane, text=hint, bg="#edf2f8", fg="#7b879b", font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(3, 9))
+            if not items:
+                tk.Label(lane, text="暂无零件", bg="#edf2f8", fg="#94a3b8", font=("Microsoft YaHei UI", 9)).pack(pady=26)
+            for row in items: self._create_part_card(lane, row, color)
+        self.parts_board_caption.configure(text=f"共 {len(rows)} 个自定义零件")
+        self._apply_surface_theme(self.parts_page)
 
-    def load_selected_part(self, _event=None):
-        selected = self.parts_tree.selection()
-        if not selected: return
-        self.selected_part_id = int(selected[0]); row = self.conn.execute("SELECT * FROM parts WHERE id=?", (self.selected_part_id,)).fetchone()
+    def _create_part_card(self, parent, row, color):
+        selected = row["id"] == self.selected_part_id
+        background, border = ("#eaf2ff", "#60a5fa") if selected else ("white", "#dfe7f1")
+        card = tk.Frame(parent, bg=background, padx=11, pady=10, highlightthickness=1, highlightbackground=border, cursor="hand2")
+        card.pack(fill="x", pady=(0, 8))
+        top = tk.Frame(card, bg=background); top.pack(fill="x")
+        tk.Label(top, text=row["name"], bg=background, fg="#172033", font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2").pack(side="left")
+        tk.Label(top, text=f"{row['stock_quantity']} {row['unit']}", bg=color, fg="white", font=("Microsoft YaHei UI", 8, "bold"), padx=7, pady=2, cursor="hand2").pack(side="right")
+        tk.Label(card, text=row["notes"] or "未填写备注", bg=background, fg="#64748b", font=("Microsoft YaHei UI", 8), cursor="hand2").pack(anchor="w", pady=(7, 0))
+        self._bind_part_card(card, row["id"])
+
+    def _bind_part_card(self, widget, part_id):
+        widget.bind("<Button-1>", lambda _event, value=part_id: self.load_selected_part(value))
+        for child in widget.winfo_children(): self._bind_part_card(child, part_id)
+
+    def load_selected_part(self, event_or_id=None):
+        if isinstance(event_or_id, int):
+            self.selected_part_id = event_or_id
+        else:
+            return
+        row = self.conn.execute("SELECT * FROM parts WHERE id=?", (self.selected_part_id,)).fetchone()
+        if not row: return
         for key in self.part_vars: self.part_vars[key].set(str(row[{"name":"name", "quantity":"stock_quantity", "unit":"unit", "notes":"notes"}[key]] or ""))
+        self.refresh_parts_table()
 
     def save_part(self):
         name = self.part_vars["name"].get().strip()
@@ -1001,6 +1080,94 @@ class DeliveryApp(tk.Tk):
             else: self.conn.execute("INSERT INTO parts(name, stock_quantity, unit, notes, updated_at) VALUES (?, ?, ?, ?, ?)", (name, quantity, self.part_vars["unit"].get().strip() or "件", self.part_vars["notes"].get().strip(), now))
         except sqlite3.IntegrityError: messagebox.showwarning("名称重复", "已有同名零件，请修改后保存。", parent=self); return
         self.conn.commit(); self.refresh_parts_table(); self.refresh_machine_choices(); self.sync_to_cloud(); self.show_toast("零件库存已保存")
+
+    def open_bulk_parts_dialog(self):
+        """一次录入多种新零件，适合首次建立配件库。"""
+        dialog = tk.Toplevel(self)
+        dialog.title("批量添加零件")
+        dialog.configure(bg="#f5f7fb")
+        dialog.transient(self)
+        dialog.geometry("820x560")
+        dialog.minsize(620, 420)
+        dialog.grab_set()
+        width, height = 820, 560
+        x = max(20, self.winfo_rootx() + (self.winfo_width() - width) // 2)
+        y = max(20, self.winfo_rooty() + (self.winfo_height() - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        shell = tk.Frame(dialog, bg="#f5f7fb", padx=22, pady=18)
+        shell.pack(fill="both", expand=True)
+        tk.Label(shell, text="批量添加零件", bg="#f5f7fb", fg="#172033", font=("Microsoft YaHei UI", 17, "bold")).pack(anchor="w")
+        tk.Label(shell, text="每行填写一种配件；检查无误后一次保存全部。", bg="#f5f7fb", fg="#64748b", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(4, 13))
+
+        list_area = tk.Frame(shell, bg="#f5f7fb")
+        list_area.pack(fill="both", expand=True)
+        list_area.rowconfigure(0, weight=1); list_area.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(list_area, bg="#f5f7fb", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(list_area, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew"); scrollbar.grid(row=0, column=1, sticky="ns")
+        table = tk.Frame(canvas, bg="white", padx=12, pady=10, highlightthickness=1, highlightbackground="#e2e8f0")
+        table_window = canvas.create_window((0, 0), window=table, anchor="nw")
+        table.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(table_window, width=event.width))
+        headers = ("零件名称 *", "初始库存 *", "单位", "备注")
+        widths = (26, 13, 11, 30)
+        for column, (label, width_chars) in enumerate(zip(headers, widths)):
+            tk.Label(table, text=label, bg="#eaf1fb", fg="#30445f", font=("Microsoft YaHei UI", 9, "bold"), padx=8, pady=8).grid(row=0, column=column, sticky="ew", padx=(0, 5) if column < 3 else 0, pady=(0, 6))
+            table.columnconfigure(column, weight=(3 if column in (0, 3) else 1))
+
+        rows = []
+        def add_row():
+            row_index = len(rows) + 1
+            variables = [tk.StringVar(), tk.StringVar(), tk.StringVar(value="件"), tk.StringVar()]
+            for column, (variable, width_chars) in enumerate(zip(variables, widths)):
+                ttk.Entry(table, textvariable=variable, width=width_chars, font=("Microsoft YaHei UI", 10)).grid(row=row_index, column=column, sticky="ew", padx=(0, 5) if column < 3 else 0, pady=3, ipady=4)
+            rows.append(variables)
+
+        add_row(); add_row(); add_row()
+        tk.Button(shell, text="＋ 添加一行", command=add_row, bg="#e8f1fd", fg="#2459a6", relief="flat", bd=0, padx=13, pady=7, cursor="hand2").pack(anchor="w", pady=(8, 0))
+        buttons = tk.Frame(shell, bg="#f5f7fb")
+        buttons.pack(fill="x", pady=(14, 0))
+
+        def save_all():
+            entries = []
+            for index, variables in enumerate(rows, start=1):
+                name, quantity_text, unit, notes = [variable.get().strip() for variable in variables]
+                if not any((name, quantity_text, notes)):
+                    continue
+                try:
+                    quantity = int(quantity_text)
+                    if quantity < 0: raise ValueError
+                except ValueError:
+                    messagebox.showwarning("库存数量不正确", f"第 {index} 行库存需要填写不小于 0 的整数。", parent=dialog)
+                    return
+                if not name:
+                    messagebox.showwarning("零件名称缺失", f"第 {index} 行请填写零件名称。", parent=dialog)
+                    return
+                entries.append((name, quantity, unit or "件", notes))
+            if not entries:
+                messagebox.showwarning("没有可保存的零件", "请至少填写一行零件信息。", parent=dialog)
+                return
+            names = [entry[0] for entry in entries]
+            if len(set(names)) != len(names):
+                messagebox.showwarning("名称重复", "批量列表中有同名零件，请检查后再保存。", parent=dialog)
+                return
+            existing = [name for name in names if self.conn.execute("SELECT 1 FROM parts WHERE name=?", (name,)).fetchone()]
+            if existing:
+                messagebox.showwarning("零件已存在", "以下零件已在库存中，请移除重复项或到库存卡片中编辑：\n" + "、".join(existing), parent=dialog)
+                return
+            now = datetime.now().isoformat(timespec="seconds")
+            self.conn.executemany("INSERT INTO parts(name, stock_quantity, unit, notes, updated_at) VALUES (?, ?, ?, ?, ?)", [(name, quantity, unit, notes, now) for name, quantity, unit, notes in entries])
+            self.conn.commit()
+            self.refresh_parts_table()
+            self.refresh_machine_choices()
+            self.sync_to_cloud()
+            dialog.destroy()
+            self.show_toast(f"已批量添加 {len(entries)} 个零件")
+
+        tk.Button(buttons, text="保存全部零件", command=save_all, bg="#2563eb", fg="white", relief="flat", bd=0, padx=18, pady=9, cursor="hand2").pack(side="right")
+        tk.Button(buttons, text="取消", command=dialog.destroy, bg="white", fg="#526076", relief="flat", bd=0, padx=17, pady=9, cursor="hand2").pack(side="right", padx=8)
 
     def adjust_part_stock(self, direction):
         if not self.selected_part_id: messagebox.showwarning("未选择零件", "请先在下方选择一个零件。", parent=self); return
@@ -1036,18 +1203,26 @@ class DeliveryApp(tk.Tk):
         self.machines_tree = ttk.Treeview(left, columns=("name", "model"), show="headings", selectmode="browse", height=10)
         self.machines_tree.heading("name", text="自定义机器"); self.machines_tree.heading("model", text="型号 / 说明"); self.machines_tree.column("name", width=150); self.machines_tree.column("model", width=150)
         self.machines_tree.grid(row=7, column=0, sticky="nsew"); self.machines_tree.bind("<<TreeviewSelect>>", self.load_selected_machine)
-        right = tk.Frame(page, bg="white", padx=18, pady=16, highlightthickness=1, highlightbackground="#e2e8f0"); right.grid(row=2, column=1, sticky="nsew"); right.columnconfigure(0, weight=1); right.rowconfigure(3, weight=1)
-        tk.Label(right, text="所需配件", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        add = tk.Frame(right, bg="white"); add.grid(row=1, column=0, sticky="ew", pady=12); add.columnconfigure(0, weight=1)
+        right = tk.Frame(page, bg="white", padx=18, pady=16, highlightthickness=1, highlightbackground="#e2e8f0"); right.grid(row=2, column=1, sticky="nsew"); right.columnconfigure(0, weight=1); right.rowconfigure(4, weight=1)
+        tk.Label(right, text="所需配件看板", bg="white", fg="#172033", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        self.machine_status_bar = tk.Frame(right, bg="#edf2f8", padx=10, pady=8); self.machine_status_bar.grid(row=1, column=0, sticky="ew", pady=(10, 4))
+        self.machine_status_values = []
+        for title, color in (("缺货", "#ef4444"), ("偏低", "#f59e0b"), ("充足", "#10b981")):
+            state = tk.Label(self.machine_status_bar, text=f"{title}  0", bg="#edf2f8", fg=color, font=("Microsoft YaHei UI", 9, "bold"))
+            state.pack(side="left", padx=(0, 20)); self.machine_status_values.append(state)
+        add = tk.Frame(right, bg="white"); add.grid(row=2, column=0, sticky="ew", pady=12); add.columnconfigure(0, weight=1)
         self.machine_part_combo = ttk.Combobox(add, textvariable=self.machine_vars["part"], values=self.get_part_names(), state="readonly"); self.machine_part_combo.grid(row=0, column=0, sticky="ew", ipady=4)
         ttk.Entry(add, textvariable=self.machine_vars["part_quantity"], width=9).grid(row=0, column=1, padx=8, ipady=4)
         tk.Button(add, text="加入配件", command=self.add_machine_part, bg="#e0f2fe", fg="#0369a1", relief="flat", bd=0, padx=12, pady=7, cursor="hand2").grid(row=0, column=2)
         self.machine_parts_tree = ttk.Treeview(right, columns=("part", "quantity", "stock"), show="headings", selectmode="browse")
         for key, title, width in (("part", "零件", 230), ("quantity", "每台需求", 110), ("stock", "现有库存", 110)):
             self.machine_parts_tree.heading(key, text=title); self.machine_parts_tree.column(key, width=width, anchor="center" if key != "part" else "w")
-        self.machine_parts_tree.grid(row=3, column=0, sticky="nsew")
-        tk.Button(right, text="移除选中配件", command=self.remove_machine_part, bg="#fff1f2", fg="#be123c", relief="flat", bd=0, padx=12, pady=8, cursor="hand2").grid(row=4, column=0, sticky="w", pady=(12, 0))
-        self.selected_machine_id = None; self.refresh_machines()
+        self.machine_parts_tree.tag_configure("missing", background="#fff1f2", foreground="#b91c1c")
+        self.machine_parts_tree.tag_configure("low", background="#fffbeb", foreground="#a16207")
+        self.machine_parts_tree.tag_configure("ready", background="#ecfdf5", foreground="#047857")
+        self.machine_parts_tree.grid(row=4, column=0, sticky="nsew")
+        tk.Button(right, text="移除选中配件", command=self.remove_machine_part, bg="#fff1f2", fg="#be123c", relief="flat", bd=0, padx=12, pady=8, cursor="hand2").grid(row=5, column=0, sticky="w", pady=(12, 0))
+        self.selected_machine_id = None; self.refresh_machines(); self._apply_surface_theme(page)
 
     def get_part_names(self): return [row[0] for row in self.conn.execute("SELECT name FROM parts ORDER BY name").fetchall()]
 
@@ -1088,7 +1263,17 @@ class DeliveryApp(tk.Tk):
         if not hasattr(self, "machine_parts_tree"): return
         self.machine_parts_tree.delete(*self.machine_parts_tree.get_children())
         rows = self.conn.execute("SELECT mp.id, p.name, mp.quantity, p.stock_quantity FROM machine_parts mp JOIN parts p ON p.id=mp.part_id WHERE mp.machine_id=? ORDER BY p.name", (self.selected_machine_id,)).fetchall()
-        for row in rows: self.machine_parts_tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["quantity"], row["stock_quantity"]))
+        counts = {"missing": 0, "low": 0, "ready": 0}
+        for row in rows:
+            stock = int(row["stock_quantity"])
+            tag = "missing" if stock == 0 else ("low" if stock <= 10 else "ready")
+            counts[tag] += 1
+            self.machine_parts_tree.insert("", "end", iid=str(row["id"]), values=(row["name"], row["quantity"], stock), tags=(tag,))
+        if hasattr(self, "machine_status_values"):
+            for label, value in zip(self.machine_status_values, (counts["missing"], counts["low"], counts["ready"])):
+                label.configure(text=label.cget("text").split()[0] + f"  {value}")
+        if hasattr(self, "machines_page"):
+            self._apply_surface_theme(self.machines_page)
 
     def remove_machine_part(self):
         selected = self.machine_parts_tree.selection()
@@ -1138,6 +1323,7 @@ class DeliveryApp(tk.Tk):
         self.stock_canvas.bind("<MouseWheel>", lambda event: self.stock_canvas.yview_scroll(int(-event.delta / 120), "units"))
         self.stock_canvas.grid(row=1, column=0, sticky="nsew"); scroll.grid(row=1, column=1, sticky="ns")
         self.refresh_stocking_table()
+        self._apply_surface_theme(page)
 
     def refresh_stocking_table(self):
         if not hasattr(self, "stock_cards_frame"):
@@ -1164,6 +1350,7 @@ class DeliveryApp(tk.Tk):
             label = {"全部": "全部订单", "待备货": "待备货", "已备货": "已备货", "待发货": "待发货"}[key]
             button.configure(text=f"{label}\n{counts[key]}", bg="#dbeafe" if key == filter_value else "white")
         self.stock_summary.config(text=f"当前查看“{filter_value}”模块 · 共 {len(rows)} 条项目")
+        self._apply_surface_theme(self.stocking_page)
 
     def _create_stock_card(self, row, index):
         """备货客户信息卡；一张卡对应一条订单，可整卡点击选中。"""
@@ -1323,6 +1510,7 @@ class DeliveryApp(tk.Tk):
         self.shipped_tree.configure(yscrollcommand=scroll.set)
         self.shipped_tree.grid(row=1, column=0, sticky="nsew"); scroll.grid(row=1, column=1, sticky="ns")
         self.refresh_shipped_table()
+        self._apply_surface_theme(page)
 
     def refresh_shipped_table(self):
         if not hasattr(self, "shipped_tree"): return
@@ -1333,6 +1521,8 @@ class DeliveryApp(tk.Tk):
             values = (row["customer"], row["contact"], row["phone"], row["product"], row["spec"], row["quantity"], row["delivery_date"], shipped_at)
             self.shipped_tree.insert("", "end", values=values)
         self.shipped_summary.config(text=f"已存档 {len(rows)} 条已发货客户订单，可随时查询客户、产品与发货时间。")
+        if hasattr(self, "shipped_page"):
+            self._apply_surface_theme(self.shipped_page)
 
     def show_orders(self):
         self._show_page(self.body)
