@@ -24,8 +24,15 @@ $icon = Join-Path $root "客户管理器.ico"
 if (-not (Test-Path $icon)) { python "$root\create_icon.py" }
 python -m py_compile app.py server\account_server.py
 python -m PyInstaller --noconfirm --clean --onefile --windowed --icon $icon --name "客户管理器" app.py
-Copy-Item -LiteralPath "$root\dist\客户管理器.exe" -Destination "$root\客户管理器.exe" -Force
+$builtAsset = Join-Path $root "dist\客户管理器.exe"
 $asset = Join-Path $root "客户管理器.exe"
+try {
+    Copy-Item -LiteralPath $builtAsset -Destination $asset -Force
+} catch [System.IO.IOException] {
+    # 当前用户正在运行旧客户端时，仍可用 dist 内的新版文件继续发布。
+    $asset = $builtAsset
+    Write-Host "本地客户端正在运行，已使用新打包文件继续发布。" -ForegroundColor Yellow
+}
 $hashAsset = "$asset.sha256"
 $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
 Set-Content -LiteralPath $hashAsset -Value "$hash  客户管理器.exe" -Encoding ascii
