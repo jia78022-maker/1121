@@ -48,7 +48,7 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 CLOUD_API_BASE = "https://api.songpornsongx.top"
@@ -415,6 +415,7 @@ class DeliveryApp(TkinterDnD):
         self.autostart_enabled = autostart_is_enabled()
         self.speech_lock = threading.Lock()
         self.update_check_running = False
+        self.update_download_running = False
         self.entries = {}
         self._connect_db()
         self._setup_style()
@@ -532,10 +533,120 @@ class DeliveryApp(TkinterDnD):
                 messagebox.showinfo("已是最新版本", f"当前版本 {APP_VERSION} 已是最新版本。", parent=self)
             return
         release = result["release"]
-        notes = (release.get("body") or "暂无更新说明").strip()
-        prompt = f"发现新版本 {result['version']}（当前 {APP_VERSION}）\n\n{notes[:700]}\n\n现在下载并安装吗？"
-        if messagebox.askyesno("发现新版本", prompt, parent=self):
-            self.download_and_install_update(release)
+        self.show_update_prompt(release, result["version"])
+
+    def _center_child_window(self, window, width, height):
+        window.update_idletasks()
+        width = min(width, self.winfo_screenwidth() - 40)
+        height = min(height, self.winfo_screenheight() - 80)
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - width) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - height) // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+
+    def show_update_prompt(self, release, version):
+        """A clear in-app choice replaces the generic system yes/no prompt."""
+        dialog = tk.Toplevel(self)
+        dialog.title("发现新版本")
+        dialog.configure(bg="#f5f7fb")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        shell = tk.Frame(dialog, bg="white", padx=28, pady=24, highlightthickness=1, highlightbackground="#dce5f0")
+        shell.pack(fill="both", expand=True, padx=12, pady=12)
+        icon = tk.Canvas(shell, width=48, height=48, bg="white", highlightthickness=0)
+        icon.pack(anchor="w")
+        icon.create_oval(4, 4, 44, 44, fill="#e8f1fd", outline="")
+        icon.create_text(24, 24, text="↑", fill="#2563eb", font=("Segoe UI", 21, "bold"))
+        tk.Label(shell, text=f"发现新版本  {version}", bg="white", fg="#172033", font=("Microsoft YaHei UI", 17, "bold")).pack(anchor="w", pady=(10, 3))
+        tk.Label(shell, text=f"当前版本 {APP_VERSION} · 更新内容", bg="white", fg="#64748b", font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+        notes = (release.get("body") or "暂无更新说明").strip()[:900]
+        note_box = tk.Text(shell, height=6, wrap="word", bg="#f7f9fc", fg="#334155", relief="flat", bd=0, padx=12, pady=10,
+                           font=("Microsoft YaHei UI", 9), highlightthickness=1, highlightbackground="#e6edf5")
+        note_box.pack(fill="both", expand=True, pady=(14, 18))
+        note_box.insert("1.0", notes)
+        note_box.configure(state="disabled")
+        actions = tk.Frame(shell, bg="white")
+        actions.pack(fill="x")
+        tk.Button(actions, text="暂不更新", command=dialog.destroy, bg="#f1f5f9", fg="#475569", relief="flat", bd=0,
+                  font=("Microsoft YaHei UI", 10, "bold"), padx=18, pady=10, cursor="hand2").pack(side="right")
+        tk.Button(actions, text="立即更新", command=lambda: self._accept_update(dialog, release), bg="#2563eb", fg="white", relief="flat", bd=0,
+                  activebackground="#1d4ed8", activeforeground="white", font=("Microsoft YaHei UI", 10, "bold"), padx=20, pady=10, cursor="hand2").pack(side="right", padx=(0, 9))
+        self._center_child_window(dialog, 520, 440)
+        dialog.grab_set()
+        dialog.lift()
+
+    def _accept_update(self, dialog, release):
+        dialog.destroy()
+        self.download_and_install_update(release)
+
+    def _open_update_progress(self, version):
+        dialog = tk.Toplevel(self)
+        dialog.title("正在更新客户管理器")
+        dialog.configure(bg="#f4f7fb")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+        panel = tk.Frame(dialog, bg="white", padx=30, pady=26, highlightthickness=1, highlightbackground="#dce5f0")
+        panel.pack(fill="both", expand=True, padx=12, pady=12)
+        self._update_animation_canvas = tk.Canvas(panel, width=74, height=74, bg="white", highlightthickness=0)
+        self._update_animation_canvas.pack(pady=(0, 12))
+        tk.Label(panel, text=f"正在更新至 {version}", bg="white", fg="#172033", font=("Microsoft YaHei UI", 16, "bold")).pack()
+        self._update_progress_label = tk.Label(panel, text="正在连接下载服务器…", bg="white", fg="#64748b", font=("Microsoft YaHei UI", 9))
+        self._update_progress_label.pack(pady=(7, 3))
+        self._update_progress_bar = ttk.Progressbar(panel, orient="horizontal", mode="determinate", maximum=100, length=420)
+        self._update_progress_bar.pack(fill="x", pady=(12, 5))
+        self._update_progress_percent = tk.Label(panel, text="准备下载", bg="white", fg="#2563eb", font=("Segoe UI", 9, "bold"))
+        self._update_progress_percent.pack(anchor="e")
+        tk.Label(panel, text="请保持软件开启，完成后会自动重启。", bg="white", fg="#94a3b8", font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(13, 0))
+        self._update_dialog = dialog
+        self._center_child_window(dialog, 500, 330)
+        dialog.grab_set()
+        dialog.lift()
+        self._update_animation_step = 0
+        self._animate_update_icon()
+
+    def _animate_update_icon(self):
+        dialog = getattr(self, "_update_dialog", None)
+        canvas = getattr(self, "_update_animation_canvas", None)
+        if not dialog or not dialog.winfo_exists() or not canvas or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        cx = cy = 37
+        colors = ("#dbeafe", "#bfdbfe", "#93c5fd", "#60a5fa", "#3b82f6", "#2563eb", "#60a5fa", "#93c5fd")
+        offset = self._update_animation_step % len(colors)
+        for index in range(8):
+            angle = (index * math.tau / 8) - math.pi / 2
+            x = cx + math.cos(angle) * 25
+            y = cy + math.sin(angle) * 25
+            size = 4.5 if index == offset else 3.2
+            canvas.create_oval(x - size, y - size, x + size, y + size, fill=colors[(index - offset) % len(colors)], outline="")
+        canvas.create_oval(21, 21, 53, 53, outline="#e8f1fd", width=2)
+        canvas.create_text(cx, cy, text="↓", fill="#2563eb", font=("Segoe UI", 17, "bold"))
+        self._update_animation_step += 1
+        dialog.after(85, self._animate_update_icon)
+
+    def _set_update_progress(self, downloaded=None, total=None, stage=None, done=False):
+        dialog = getattr(self, "_update_dialog", None)
+        if not dialog or not dialog.winfo_exists():
+            return
+        if stage:
+            self._update_progress_label.configure(text=stage)
+        if done:
+            self._update_progress_bar.stop()
+            self._update_progress_bar.configure(mode="determinate")
+            self._update_progress_bar["value"] = 100
+            self._update_progress_percent.configure(text="100% · 校验通过")
+        elif total and total > 0 and downloaded is not None:
+            self._update_progress_bar.stop()
+            self._update_progress_bar.configure(mode="determinate")
+            percent = min(99, downloaded * 100 / total)
+            self._update_progress_bar["value"] = percent
+            self._update_progress_percent.configure(text=f"{percent:.0f}%  ·  {downloaded / 1048576:.1f} / {total / 1048576:.1f} MB")
+        elif downloaded is not None:
+            if str(self._update_progress_bar.cget("mode")) != "indeterminate":
+                self._update_progress_bar.configure(mode="indeterminate")
+                self._update_progress_bar.start(12)
+            self._update_progress_percent.configure(text=f"已接收 {downloaded / 1048576:.1f} MB")
 
     def download_and_install_update(self, release):
         """下载 Release 附件并以 SHA-256 校验后交由独立脚本替换正在运行的 EXE。"""
@@ -548,32 +659,70 @@ class DeliveryApp(TkinterDnD):
         if not executable or not checksum:
             messagebox.showwarning("发布文件不完整", "该 GitHub Release 必须同时包含“客户管理器.exe”和对应的“.sha256”校验文件，已取消安装。", parent=self)
             return
+        if self.update_download_running:
+            return
+        self.update_download_running = True
         self.update_button.configure(text="↓  正在下载…", state="disabled")
+        version = release.get("tag_name") or release.get("name") or "新版"
+        self._open_update_progress(version)
 
         def worker():
+            package_path = Path(tempfile.gettempdir()) / "客户管理器-update.exe"
             try:
                 headers = {"User-Agent": "CustomerManager-Updater"}
                 with urllib.request.urlopen(urllib.request.Request(executable["browser_download_url"], headers=headers), timeout=90, context=github_ssl_context()) as response:
-                    package = response.read()
+                    try:
+                        total = int(response.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        total = 0
+                    digest = hashlib.sha256()
+                    downloaded = 0
+                    last_ui_update = 0.0
+                    with open(package_path, "wb") as package_file:
+                        while True:
+                            chunk = response.read(128 * 1024)
+                            if not chunk:
+                                break
+                            package_file.write(chunk)
+                            digest.update(chunk)
+                            downloaded += len(chunk)
+                            now = time.monotonic()
+                            if now - last_ui_update >= 0.15 or (total and downloaded >= total):
+                                self.after(0, lambda current=downloaded, expected=total: self._set_update_progress(
+                                    current, expected, "正在下载新版客户端…"))
+                                last_ui_update = now
+                self.after(0, lambda: self._set_update_progress(downloaded, total, "下载完成，正在校验文件…"))
                 with urllib.request.urlopen(urllib.request.Request(checksum["browser_download_url"], headers=headers), timeout=20, context=github_ssl_context()) as response:
                     expected = response.read().decode("utf-8").strip().split()[0].lower()
-                actual = hashlib.sha256(package).hexdigest().lower()
+                actual = digest.hexdigest().lower()
                 if not expected or actual != expected:
                     raise ValueError("下载文件的 SHA-256 校验失败")
-                package_path = Path(tempfile.gettempdir()) / "客户管理器-update.exe"
-                package_path.write_bytes(package)
-                self.after(0, lambda: self._replace_with_update(package_path))
+                self.after(0, lambda: self._set_update_progress(stage="校验通过，正在准备安装…", done=True))
+                self.after(650, lambda: self._replace_with_update(package_path))
             except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as error:
-                self.after(0, lambda: self._update_install_failed(str(error)))
+                try:
+                    package_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.after(0, lambda detail=str(error): self._update_install_failed(detail))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_install_failed(self, detail):
+        self.update_download_running = False
+        dialog = getattr(self, "_update_dialog", None)
+        if dialog and dialog.winfo_exists():
+            dialog.destroy()
+        self._update_dialog = None
         if hasattr(self, "update_button") and self.update_button.winfo_exists():
             self.update_button.configure(text="↻  检查更新", state="normal")
         messagebox.showerror("更新失败", "下载或校验新版本时出错，当前版本未被修改。\n\n" + detail, parent=self)
 
     def _replace_with_update(self, package_path):
+        dialog = getattr(self, "_update_dialog", None)
+        if dialog and dialog.winfo_exists():
+            dialog.destroy()
+        self._update_dialog = None
         target = Path(sys.executable).resolve()
         script = Path(tempfile.gettempdir()) / "客户管理器-update.bat"
         # /b 等待当前进程结束后再覆盖，随后立即启动新程序；失败不会删除旧程序。
