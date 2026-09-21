@@ -24,8 +24,11 @@ $icon = Join-Path $root "客户管理器.ico"
 if (-not (Test-Path $icon)) { python "$root\create_icon.py" }
 $caBundle = Join-Path $root "certs\cacert.pem"
 if (-not (Test-Path $caBundle)) { throw "缺少 GitHub HTTPS 根证书包：$caBundle" }
+python -m pip install -r requirements.txt
+if ($LASTEXITCODE -ne 0) { throw "Python 依赖安装失败。" }
 python -m py_compile app.py server\account_server.py
-python -m PyInstaller --noconfirm --clean --onefile --windowed --icon $icon --add-data "$caBundle;certs" --name "客户管理器" app.py
+if ($LASTEXITCODE -ne 0) { throw "Python 语法检查失败。" }
+python -m PyInstaller --noconfirm --clean --onefile --windowed --icon $icon --add-data "$caBundle;certs" --collect-all tkinterdnd2 --name "客户管理器" app.py
 $builtAsset = Join-Path $root "dist\客户管理器.exe"
 $asset = Join-Path $root "客户管理器.exe"
 try {
@@ -42,7 +45,7 @@ $zipAsset = Join-Path $root "客户管理器-v$Version.zip"
 Compress-Archive -LiteralPath $asset, $hashAsset -DestinationPath $zipAsset -Force
 
 # 只提交源代码和图标；本地账号、订单数据库、EXE 与令牌均由 .gitignore 排除。
-git add app.py create_icon.py 客户管理器.ico 客户管理器图标.png certs\cacert.pem server\account_server.py .gitignore 发布到GitHub.ps1
+git add app.py create_icon.py 客户管理器.ico 客户管理器图标.png certs\cacert.pem requirements.txt server\account_server.py .gitignore 发布到GitHub.ps1
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
     git commit -m "release: 客户管理器 v$Version"

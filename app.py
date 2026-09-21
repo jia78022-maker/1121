@@ -6,6 +6,8 @@ import hashlib
 import json
 import math
 import os
+import posixpath
+import re
 import sqlite3
 import subprocess
 import sys
@@ -16,6 +18,12 @@ import threading
 import urllib.error
 import urllib.request
 import winreg
+import zipfile
+import xml.etree.ElementTree as ET
+try:
+    from tkinterdnd2 import DND_FILES, Tk as TkinterDnD
+except ImportError:
+    DND_FILES, TkinterDnD = None, tk.Tk
 import tkinter as tk
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -40,7 +48,7 @@ UI_SETTINGS_PATH = APP_DIR / "ui_settings.json"
 REMINDER_LOG_PATH = APP_DIR / "reminder_log.json"
 AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_NAME = "客户管理器"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.7"
 GITHUB_REPOSITORY = "jia78022-maker/1121"
 GITHUB_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 CLOUD_API_BASE = "https://api.songpornsongx.top"
@@ -51,6 +59,145 @@ def github_ssl_context():
     bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     ca_bundle = bundle_root / "certs" / "cacert.pem"
     return ssl.create_default_context(cafile=str(ca_bundle))
+
+
+ORDER_IMPORT_ALIASES = {
+    "customer": ("客户名称", "客户", "购货单位", "单位名称"),
+    "contact": ("联系人", "对接人", "业务联系人"),
+    "phone": ("联系电话", "联系手机", "手机号码", "联系电话/手机", "电话", "手机"),
+    "product": ("产品名称", "产品", "设备名称", "机器名称"),
+    "spec": ("产品型号/规格", "产品型号", "型号/规格", "型号 / 规格", "型号规格", "型号", "规格"),
+    "quantity": ("订购数量", "采购数量", "产品数量", "数量"),
+    "price": ("产品单价", "单价", "价格"),
+    "delivery_days": ("交货天数", "交期天数", "交付天数"),
+    "delivery_date": ("交货日期", "交货期限", "交付日期", "交期"),
+    "status": ("订单状态", "状态"),
+    "notes": ("备注", "说明", "订单备注"),
+}
+
+
+def _xml_text(element):
+    return "".join(node.text or "" for node in element.iter() if node.tag.endswith("}t"))
+
+
+def read_import_document(path):
+    """Read common WPS-compatible DOCX/XLSX plus CSV and plain-text order sheets."""
+    suffix = Path(path).suffix.lower()
+    rows, lines = [], []
+    if suffix == ".docx":
+        with zipfile.ZipFile(path) as archive:
+            root = ET.fromstring(archive.read("word/document.xml"))
+        for paragraph in (node for node in root.iter() if node.tag.endswith("}p")):
+            value = _xml_text(paragraph).strip()
+            if value:
+                lines.append(value)
+        for table_row in (node for node in root.iter() if node.tag.endswith("}tr")):
+            cells = []
+            for cell in (node for node in table_row if node.tag.endswith("}tc")):
+                cells.append(_xml_text(cell).strip())
+            if cells:
+                rows.append(cells)
+    elif suffix == ".xlsx":
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            shared = []
+            if "xl/sharedStrings.xml" in names:
+                strings_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared = [_xml_text(item) for item in strings_root if item.tag.endswith("}si")]
+            sheets = sorted(name for name in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name))
+            for sheet in sheets:
+                sheet_root = ET.fromstring(archive.read(sheet))
+                for row_node in (node for node in sheet_root.iter() if node.tag.endswith("}row")):
+                    cell_values = {}
+                    for cell in (node for node in row_node if node.tag.endswith("}c")):
+                        value_node = next((item for item in cell if item.tag.endswith("}v")), None)
+                        inline_node = next((item for item in cell if item.tag.endswith("}is")), None)
+                        value = _xml_text(inline_node).strip() if inline_node is not None else ((value_node.text or "").strip() if value_node is not None else "")
+                        if cell.attrib.get("t") == "s" and value:
+                            value = shared[int(value)] if int(value) < len(shared) else value
+                        column = 0
+                        letters = re.match(r"[A-Za-z]+", cell.attrib.get("r", ""))
+                        if letters:
+                            for char in letters.group().upper():
+                                column = column * 26 + ord(char) - ord("A") + 1
+                            column -= 1
+                        else:
+                            column = len(cell_values)
+                        cell_values[column] = value
+                    cells = [cell_values.get(index, "") for index in range(max(cell_values, default=-1) + 1)]
+                    if cells:
+                        rows.append(cells)
+    elif suffix == ".csv":
+        with open(path, "r", encoding="utf-8-sig", newline="") as source:
+            sample = source.read(4096)
+            source.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+            except csv.Error:
+                dialect = csv.excel
+            rows = [[cell.strip() for cell in row] for row in csv.reader(source, dialect)]
+    elif suffix == ".txt":
+        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    else:
+        raise ValueError("目前支持 WPS 可打开的 .docx、.xlsx，以及 .csv、.txt 文件。旧版 .wps/.et 请先在 WPS 中另存为 .docx/.xlsx。")
+    if rows:
+        lines.extend(" | ".join(cell for cell in row if cell) for row in rows)
+    return rows, lines
+
+
+def extract_order_fields(rows, lines):
+    """Match common Chinese order labels in text, key-value tables, or header rows."""
+    aliases = {}
+    for key, names in ORDER_IMPORT_ALIASES.items():
+        for name in names:
+            aliases[re.sub(r"[\s:：=]+", "", name).lower()] = key
+    found = {}
+
+    def clean(value):
+        return re.sub(r"^[\s:：=,，;；]+|[\s:：=,，;；]+$", "", str(value or "")).strip()
+
+    def assign(label, value):
+        key = aliases.get(re.sub(r"[\s:：=]+", "", clean(label)).lower())
+        value = clean(value)
+        if key and value and key not in found:
+            found[key] = value
+
+    for line in lines:
+        for name in sorted((name for names in ORDER_IMPORT_ALIASES.values() for name in names), key=len, reverse=True):
+            match = re.search(re.escape(name) + r"\s*[:：=]\s*([^|,，;；]+)", line)
+            if match:
+                assign(name, match.group(1))
+
+    for row_index, row in enumerate(rows):
+        for cell_index, cell in enumerate(row):
+            normalized = re.sub(r"[\s:：=]+", "", clean(cell)).lower()
+            if normalized not in aliases:
+                continue
+            key = aliases[normalized]
+            if key in found:
+                continue
+            value = next((clean(item) for item in row[cell_index + 1:] if clean(item)), "")
+            if re.sub(r"[\s:：=]+", "", value).lower() in aliases:
+                value = ""
+            if not value and row_index + 1 < len(rows) and cell_index < len(rows[row_index + 1]):
+                value = clean(rows[row_index + 1][cell_index])
+            if value and re.sub(r"[\s:：=]+", "", value).lower() not in aliases:
+                found[key] = value
+
+    for index, line in enumerate(lines[:-1]):
+        normalized = re.sub(r"[\s:：=]+", "", clean(line)).lower()
+        if normalized in aliases:
+            assign(line, lines[index + 1])
+
+    if "delivery_days" not in found and found.get("delivery_date"):
+        match = re.search(r"(\d{4})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?", found["delivery_date"])
+        if match:
+            try:
+                due = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                found["delivery_days"] = str(max(0, (due - date.today()).days))
+            except ValueError:
+                pass
+    return found
 
 THEMES = {
     "light": {"bg": "#f3f6fb", "surface": "#ffffff", "border": "#dce5f0", "text": "#1e293b", "muted": "#64748b", "accent": "#2563eb", "accent_active": "#1d4ed8", "head": "#eaf1fb", "selected": "#bfdbfe"},
@@ -239,7 +386,7 @@ class CloudLoginDialog(tk.Toplevel):
         self.destroy()
 
 
-class DeliveryApp(tk.Tk):
+class DeliveryApp(TkinterDnD):
     FIELDS = [
         ("客户名称", "customer", True),
         ("联系人", "contact", False),
@@ -272,6 +419,7 @@ class DeliveryApp(tk.Tk):
         self._connect_db()
         self._setup_style()
         self._build_ui()
+        self._setup_file_drop()
         self.apply_theme()
         self.refresh_table()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -281,6 +429,42 @@ class DeliveryApp(tk.Tk):
         self.bind_all("<B1-Motion>", self._perform_resize, add="+")
         self.bind_all("<ButtonRelease-1>", self._end_resize, add="+")
         self.bind("<Configure>", self._responsive_layout, add="+")
+
+    def _setup_file_drop(self):
+        """Register the main window and existing controls for Explorer file drops."""
+        if DND_FILES is None:
+            return
+        self._register_drop_targets(self)
+
+    def _register_drop_targets(self, widget):
+        if DND_FILES is None:
+            return
+        try:
+            if not getattr(widget, "_customer_manager_drop_registered", False):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>", self._handle_file_drop, add="+")
+                widget._customer_manager_drop_registered = True
+        except (AttributeError, RuntimeError, tk.TclError):
+            pass
+        for child in widget.winfo_children():
+            self._register_drop_targets(child)
+
+    def _handle_file_drop(self, event):
+        try:
+            paths = [Path(item) for item in self.tk.splitlist(event.data)]
+        except (tk.TclError, TypeError):
+            return "refuse_drop"
+        files = [path for path in paths if path.is_file()]
+        if not files:
+            return "refuse_drop"
+        supported = [path for path in files if path.suffix.lower() in {".docx", ".xlsx", ".csv", ".txt"}]
+        if not supported:
+            messagebox.showwarning("文件格式不支持", "请拖入 .docx、.xlsx、.csv 或 .txt 订单文件。", parent=self)
+            return "refuse_drop"
+        if len(supported) > 1:
+            messagebox.showinfo("一次导入一个文件", "检测到多个支持的文件，本次先导入第一个文件。", parent=self)
+        self.import_order_file(str(supported[0]))
+        return "copy"
 
     def authenticate(self):
         """恢复云端会话，或要求手机号/密码登录。"""
@@ -631,8 +815,11 @@ class DeliveryApp(tk.Tk):
         self.form = form
         self.form_title = tk.Label(form, text="新建订单", bg="white", fg="#172033", font=("Microsoft YaHei UI", 13, "bold"))
         self.form_title.grid(row=0, column=0, sticky="w")
-        self.form_hint = tk.Label(form, text="填写必要信息后保存，系统会自动追踪交货时间。", bg="white", fg="#7b879b", font=("Microsoft YaHei UI", 9))
-        self.form_hint.grid(row=0, column=1, columnspan=2, sticky="w", padx=14)
+        self.form_hint = tk.Label(form, text="填写后保存，也可拖入订单文件自动识别。", bg="white", fg="#7b879b", font=("Microsoft YaHei UI", 9))
+        self.form_hint.grid(row=0, column=1, sticky="w", padx=14)
+        self.import_button = tk.Button(form, text="选择文件导入", command=self.import_order_file, bg="#e8f1fd", fg="#2459a6", relief="flat", bd=0,
+                                       font=("Microsoft YaHei UI", 9, "bold"), padx=13, pady=7, cursor="hand2")
+        self.import_button.grid(row=0, column=2, sticky="e")
         for col in range(3): form.columnconfigure(col, weight=1)
         self.field_slots = []
         for index, (label, key, required) in enumerate(self.FIELDS):
@@ -932,6 +1119,7 @@ class DeliveryApp(tk.Tk):
             if candidate is not None and candidate.winfo_exists():
                 candidate.place_forget()
         page.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._register_drop_targets(page)
         self._apply_surface_theme(page)
         page.lift()
 
@@ -1598,6 +1786,45 @@ class DeliveryApp(tk.Tk):
         for index in range(0, len(labels), step):
             x = left + index * plot_w / (count - 1)
             canvas.create_text(x, height - 15, text=labels[index], fill="#8b98aa", font=("Microsoft YaHei UI", 8))
+
+    def import_order_file(self, path=None):
+        if path is None:
+            path = filedialog.askopenfilename(
+                parent=self,
+                title="选择订单文件",
+                filetypes=[("WPS / Office 文档", "*.docx *.xlsx"), ("文字或表格", "*.txt *.csv"), ("所有文件", "*.*")],
+            )
+        if not path:
+            return
+        try:
+            rows, lines = read_import_document(path)
+            values = extract_order_fields(rows, lines)
+        except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError, csv.Error) as error:
+            messagebox.showerror("导入失败", f"无法读取此文件：\n{error}", parent=self)
+            return
+        if not values:
+            messagebox.showwarning("未识别到订单信息", "没有找到客户、产品等可识别字段。请确认文档中包含“客户名称：...”一类标签，或使用“字段名称 | 内容”的表格格式。", parent=self)
+            return
+        current = any(field.get().strip() for field in self.entries.values()) or bool(self.notes.get("1.0", "end").strip()) or bool(self.selected_id)
+        if current and not messagebox.askyesno("替换当前表单", "导入会先清空当前订单表单，再填入识别到的信息。是否继续？", parent=self):
+            return
+        self.clear_form()
+        labels = {key: label for label, key, _required in self.FIELDS}
+        for key, value in values.items():
+            if key == "delivery_date":
+                continue
+            if key == "notes":
+                self.notes.insert("1.0", value)
+            elif key in self.entries:
+                field = self.entries[key]
+                if isinstance(field, ttk.Combobox):
+                    field.set(value)
+                else:
+                    field.delete(0, "end")
+                    field.insert(0, value)
+        self.refresh_delivery_preview()
+        detected = [labels.get(key, "备注" if key == "notes" else "交货日期") for key in values]
+        messagebox.showinfo("识别完成", "已识别并填入：" + "、".join(detected) + "\n请核对信息后点击“保存订单”。", parent=self)
 
     def values_from_form(self):
         return {key: self.entries[key].get().strip() for _label, key, _required in self.FIELDS}
